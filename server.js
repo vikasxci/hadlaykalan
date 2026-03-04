@@ -36,6 +36,7 @@ app.use('/api/farmer', require('./routes/farmer'));
 app.use('/api/weather', require('./routes/weather'));
 app.use('/api/village-info', require('./routes/villageInfo'));
 app.use('/api/contest', require('./routes/contest'));
+app.use('/api/posts', require('./routes/posts'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
