@@ -17,6 +17,7 @@ const contestantSchema = new mongoose.Schema({
 // Main Contest schema - 1v1 battle
 const contestSchema = new mongoose.Schema({
   title: { type: String, trim: true, default: 'Photo Contest' },
+  contestType: { type: String, trim: true, default: 'Photo Contest' }, // e.g. Photo Contest, Selfie Contest, Best Smile etc.
   contestantA: contestantSchema,
   contestantB: contestantSchema,
   status: {
