@@ -37,6 +37,7 @@ app.use('/api/weather', require('./routes/weather'));
 app.use('/api/village-info', require('./routes/villageInfo'));
 app.use('/api/contest', require('./routes/contest'));
 app.use('/api/posts', require('./routes/posts'));
+app.use('/api/settings', require('./routes/settings'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
@@ -62,7 +63,9 @@ app.get('/', (req, res) => {
       weather: '/api/weather',
       sliders: '/api/sliders',
       villageInfo: '/api/village-info',
-      contest: '/api/contest'
+      contest: '/api/contest',
+      posts: '/api/posts',
+      settings: '/api/settings'
     },
     note: 'Frontend is deployed separately'
   });
