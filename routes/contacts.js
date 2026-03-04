@@ -8,9 +8,17 @@ const cloudinary = require('cloudinary').v2;
 // Get all approved contacts
 router.get('/', async (req, res) => {
   try {
-    const { role } = req.query;
+    const { role, area, search } = req.query;
     const filter = { isApproved: true };
     if (role && role !== 'all') filter.role = role;
+    if (area && area !== 'all') filter.areaLocation = area;
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
     const contacts = await Contact.find(filter).sort({ isImportant: -1, name: 1 });
     res.json(contacts);
   } catch (err) {
@@ -35,6 +43,7 @@ router.post('/submit', upload.single('image'), async (req, res) => {
       name: req.body.name,
       phone: req.body.phone,
       role: req.body.role,
+      areaLocation: req.body.areaLocation || '',
       address: req.body.address,
       description: req.body.description,
       isApproved: false
@@ -58,6 +67,7 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
       name: req.body.name,
       phone: req.body.phone,
       role: req.body.role,
+      areaLocation: req.body.areaLocation || '',
       address: req.body.address,
       description: req.body.description,
       isApproved: true,
@@ -100,6 +110,7 @@ router.put('/:id', auth, upload.single('image'), async (req, res) => {
     contact.name = req.body.name || contact.name;
     contact.phone = req.body.phone || contact.phone;
     contact.role = req.body.role || contact.role;
+    contact.areaLocation = req.body.areaLocation !== undefined ? req.body.areaLocation : contact.areaLocation;
     contact.address = req.body.address || contact.address;
     contact.description = req.body.description || contact.description;
     contact.isImportant = req.body.isImportant !== undefined ? req.body.isImportant === 'true' : contact.isImportant;
