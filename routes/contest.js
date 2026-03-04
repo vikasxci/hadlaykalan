@@ -70,7 +70,7 @@ router.get('/:id', async (req, res) => {
 // Otherwise, a new contest is created with this person as contestant A
 router.post('/enter', upload.single('image'), async (req, res) => {
   try {
-    const { name, age, village, bio } = req.body;
+    const { name, age, village, bio, contestType } = req.body;
     if (!name || !req.file) {
       return res.status(400).json({ message: 'Name and photo are required' });
     }
@@ -86,6 +86,8 @@ router.post('/enter', upload.single('image'), async (req, res) => {
       votes: 0,
       voterIPs: []
     };
+
+    const userContestType = contestType ? contestType.trim() : 'Photo Contest';
 
     // Check for a waiting contest (only has contestant A, no B yet)
     let contest = await Contest.findOne({
@@ -111,6 +113,8 @@ router.post('/enter', upload.single('image'), async (req, res) => {
       // Create new contest as contestant A
       const newContest = new Contest({
         contestantA: contestant,
+        contestType: userContestType,
+        title: userContestType,
         status: 'waiting'
       });
       await newContest.save();
@@ -245,13 +249,14 @@ router.put('/admin/approve/:id', auth, async (req, res) => {
   }
 });
 
-// PUT update contest title (admin)
+// PUT update contest title & type (admin)
 router.put('/admin/:id', auth, async (req, res) => {
   try {
-    const { title } = req.body;
+    const { title, contestType } = req.body;
     const contest = await Contest.findById(req.params.id);
     if (!contest) return res.status(404).json({ message: 'Contest not found' });
     if (title) contest.title = title;
+    if (contestType) contest.contestType = contestType;
     await contest.save();
     res.json({ message: 'Contest updated', contest });
   } catch (err) {
