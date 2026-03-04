@@ -4,6 +4,10 @@ const Slider = require('./models/Slider');
 const Notice = require('./models/Notice');
 const { MandiRate, FarmerTip } = require('./models/Farmer');
 const VillageInfo = require('./models/VillageInfo');
+const Post = require('./models/Post');
+const Contest = require('./models/Contest');
+const AreaLocation = require('./models/AreaLocation');
+const Role = require('./models/Role');
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGODB_URI)
@@ -276,16 +280,89 @@ const villageInfo = [
   { key: 'tehsil', value: 'शुजालपुर' }
 ];
 
-// Seed function
+// Community Posts seed data (no contacts)
+const posts = [
+  {
+    name: 'राम कुमार',
+    title: 'गाँव में नया बोरवेल लगा',
+    content: 'आज हमारे मोहल्ले में नया बोरवेल लगाया गया। अब पानी की समस्या काफी कम होगी। सरपंच जी का धन्यवाद!',
+    likes: 12,
+    isApproved: true
+  },
+  {
+    name: 'सुनीता देवी',
+    title: 'महिला स्वयं सहायता समूह की बैठक',
+    content: 'कल महिला स्वयं सहायता समूह की बैठक में नई हस्तकला परियोजना पर चर्चा हुई। सभी महिलाओं ने बहुत उत्साह दिखाया। अगली बैठक 20 मार्च को होगी।',
+    likes: 8,
+    isApproved: true
+  },
+  {
+    name: 'विकास शर्मा',
+    title: 'क्रिकेट टूर्नामेंट की तैयारी',
+    content: 'गाँव के युवा क्लब ने अंतर-गाँव क्रिकेट टूर्नामेंट की तैयारी शुरू कर दी है। इच्छुक खिलाड़ी विकास शर्मा से संपर्क करें। प्रवेश शुल्क: ₹500 प्रति टीम।',
+    likes: 15,
+    isApproved: true
+  },
+  {
+    name: 'गोपाल सिंह',
+    title: 'सोयाबीन की अच्छी उपज',
+    content: 'इस बार नई तकनीक से सोयाबीन की बुवाई की थी। प्रति एकड़ 8 क्विंटल तक उपज मिली। जो किसान भाई जानकारी चाहें वो मुझसे मिल सकते हैं।',
+    likes: 22,
+    isApproved: true
+  },
+  {
+    name: 'प्रिया पटेल',
+    title: 'स्कूल में वार्षिक उत्सव',
+    content: 'गाँव के प्राथमिक विद्यालय में 25 मार्च को वार्षिक उत्सव का आयोजन किया जाएगा। बच्चों ने नृत्य, गायन और नाटक की तैयारी शुरू कर दी है। सभी अभिभावकों से अनुरोध है कि कार्यक्रम में जरूर आएं।',
+    likes: 18,
+    isApproved: true
+  }
+];
+
+// Default Area Locations
+const areaLocations = [
+  { name: 'Hadlay Kalan', nameHi: 'हडलाय कलां' },
+  { name: 'Hadlay Khurd', nameHi: 'हडलाय खुर्द' },
+  { name: 'Polay Kalan', nameHi: 'पोलाय कलां' },
+  { name: 'Polay Khurd', nameHi: 'पोलाय खुर्द' },
+  { name: 'Bhawani Mandi', nameHi: 'भवानी मंडी' },
+  { name: 'Dug', nameHi: 'डग' },
+  { name: 'Jhalawar', nameHi: 'झालावाड़' },
+  { name: 'Kota', nameHi: 'कोटा' }
+];
+
+// Default Roles
+const roles = [
+  { name: 'sarpanch', label: 'Sarpanch', labelHi: 'सरपंच', icon: 'fa-landmark' },
+  { name: 'mantri', label: 'Mantri', labelHi: 'मंत्री', icon: 'fa-user-tie' },
+  { name: 'doctor', label: 'Doctor', labelHi: 'डॉक्टर', icon: 'fa-stethoscope' },
+  { name: 'teacher', label: 'Teacher', labelHi: 'शिक्षक', icon: 'fa-chalkboard-teacher' },
+  { name: 'shopkeeper', label: 'Shopkeeper', labelHi: 'दुकानदार', icon: 'fa-store' },
+  { name: 'farmer', label: 'Farmer', labelHi: 'किसान', icon: 'fa-tractor' },
+  { name: 'electrician', label: 'Electrician', labelHi: 'बिजली मिस्त्री', icon: 'fa-bolt' },
+  { name: 'plumber', label: 'Plumber', labelHi: 'प्लंबर', icon: 'fa-wrench' },
+  { name: 'student', label: 'Student', labelHi: 'छात्र', icon: 'fa-graduation-cap' },
+  { name: 'dairy', label: 'Dairy Farmer', labelHi: 'दुग्ध पालक', icon: 'fa-cow' },
+  { name: 'aspirant', label: 'Aspirant', labelHi: 'आकांक्षी', icon: 'fa-book-open' },
+  { name: 'ngo_worker', label: 'NGO Worker', labelHi: 'NGO कार्यकर्ता', icon: 'fa-hands-helping' },
+  { name: 'healthcare_worker', label: 'Healthcare Worker', labelHi: 'स्वास्थ्य कार्यकर्ता', icon: 'fa-heartbeat' },
+  { name: 'govt_official', label: 'Government Official', labelHi: 'सरकारी अधिकारी', icon: 'fa-building' },
+  { name: 'priest', label: 'Priest', labelHi: 'पंडित/धार्मिक नेता', icon: 'fa-om' },
+  { name: 'business_owner', label: 'Business Owner', labelHi: 'व्यवसाय मालिक', icon: 'fa-briefcase' },
+  { name: 'other', label: 'Other', labelHi: 'अन्य', icon: 'fa-user' }
+];
 async function seedDatabase() {
   try {
-    // Clear existing data (optional - comment out if you want to keep existing data)
-    console.log('Clearing existing data...');
+    // Clear existing data (NOT contacts — managed manually)
+    console.log('Clearing existing data (except contacts)...');
     await Slider.deleteMany({});
     await Notice.deleteMany({});
     await MandiRate.deleteMany({});
     await FarmerTip.deleteMany({});
     await VillageInfo.deleteMany({});
+    await Post.deleteMany({});
+    await AreaLocation.deleteMany({});
+    await Role.deleteMany({});
 
     // Insert new data
     console.log('Inserting sliders...');
@@ -303,6 +380,15 @@ async function seedDatabase() {
     console.log('Inserting village info...');
     await VillageInfo.insertMany(villageInfo);
 
+    console.log('Inserting community posts...');
+    await Post.insertMany(posts);
+
+    console.log('Inserting area locations...');
+    await AreaLocation.insertMany(areaLocations);
+
+    console.log('Inserting roles...');
+    await Role.insertMany(roles);
+
     console.log('\n✅ Database seeded successfully!');
     console.log('📊 Summary:');
     console.log(`   - ${sliders.length} Sliders`);
@@ -310,6 +396,10 @@ async function seedDatabase() {
     console.log(`   - ${mandiRates.length} Mandi Rates`);
     console.log(`   - ${farmerTips.length} Farmer Tips`);
     console.log(`   - ${villageInfo.length} Village Info Items`);
+    console.log(`   - ${posts.length} Community Posts`);
+    console.log(`   - ${areaLocations.length} Area Locations`);
+    console.log(`   - ${roles.length} Roles`);
+    console.log(`   - 0 Contacts (managed manually)`);
 
     process.exit(0);
   } catch (error) {
