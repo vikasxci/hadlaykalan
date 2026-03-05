@@ -38,6 +38,7 @@ app.use('/api/village-info', require('./routes/villageInfo'));
 app.use('/api/contest', require('./routes/contest'));
 app.use('/api/posts', require('./routes/posts'));
 app.use('/api/settings', require('./routes/settings'));
+app.use('/api/visitors', require('./routes/visitors'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
