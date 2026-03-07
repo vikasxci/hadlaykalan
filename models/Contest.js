@@ -9,7 +9,7 @@ const contestantSchema = new mongoose.Schema({
   image: { type: String, required: true },
   cloudinaryId: { type: String },
   votes: { type: Number, default: 0 },
-  voterIPs: [{ type: String }], // IPs that voted for this contestant
+  voterTokens: [{ type: String }], // Visitor tokens that voted for this contestant
   isApproved: { type: Boolean, default: false },
   submittedAt: { type: Date, default: Date.now }
 });
@@ -31,7 +31,7 @@ const contestSchema = new mongoose.Schema({
   winner: { type: String, enum: ['A', 'B', 'tie', null], default: null },
   startedAt: { type: Date }, // When battle went active (both approved)
   endsAt: { type: Date },    // startedAt + 24h
-  allVoterIPs: [{ type: String }], // All IPs that voted in this contest (for uniqueness)
+  allVoterTokens: [{ type: String }], // All visitor tokens that voted in this contest (for uniqueness)
   createdAt: { type: Date, default: Date.now }
 });
 
