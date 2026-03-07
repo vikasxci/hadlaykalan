@@ -4,6 +4,11 @@ const postSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   title: { type: String, required: true, trim: true },
   content: { type: String, required: true },
+  topic: { 
+    type: String, 
+    enum: ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'other'], 
+    default: 'message' 
+  },
   profilePic: { type: String }, // Cloudinary URL
   profilePicCloudinaryId: { type: String },
   postImage: { type: String }, // Post photo / image URL
