@@ -28,12 +28,12 @@ router.get('/', async (req, res) => {
       ]
     }).sort({ createdAt: -1 });
 
-    // Strip voter IPs from public response
+    // Strip voter tokens from public response
     const sanitized = contests.map(c => {
       const obj = c.toObject();
-      if (obj.contestantA) delete obj.contestantA.voterIPs;
-      if (obj.contestantB) delete obj.contestantB.voterIPs;
-      delete obj.allVoterIPs;
+      if (obj.contestantA) delete obj.contestantA.voterTokens;
+      if (obj.contestantB) delete obj.contestantB.voterTokens;
+      delete obj.allVoterTokens;
       return obj;
     });
 
@@ -56,9 +56,9 @@ router.get('/:id', async (req, res) => {
     }
 
     const obj = contest.toObject();
-    if (obj.contestantA) delete obj.contestantA.voterIPs;
-    if (obj.contestantB) delete obj.contestantB.voterIPs;
-    delete obj.allVoterIPs;
+    if (obj.contestantA) delete obj.contestantA.voterTokens;
+    if (obj.contestantB) delete obj.contestantB.voterTokens;
+    delete obj.allVoterTokens;
     res.json(obj);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -84,7 +84,7 @@ router.post('/enter', upload.single('image'), async (req, res) => {
       cloudinaryId: req.file.filename,
       isApproved: false,
       votes: 0,
-      voterIPs: []
+      voterTokens: []
     };
 
     const userContestType = contestType ? contestType.trim() : 'Photo Contest';
@@ -129,12 +129,15 @@ router.post('/enter', upload.single('image'), async (req, res) => {
   }
 });
 
-// POST vote for a contestant (IP-restricted)
+// POST vote for a contestant (token-restricted)
 router.post('/:id/vote', async (req, res) => {
   try {
-    const { side } = req.body; // 'A' or 'B'
+    const { side, visitorToken } = req.body; // 'A' or 'B' + visitor token
     if (!side || !['A', 'B'].includes(side)) {
       return res.status(400).json({ message: 'Invalid vote. Choose A or B.' });
+    }
+    if (!visitorToken) {
+      return res.status(400).json({ message: 'Visitor token is required to vote.' });
     }
 
     const contest = await Contest.findById(req.params.id);
@@ -150,26 +153,20 @@ router.post('/:id/vote', async (req, res) => {
       return res.status(400).json({ message: 'Voting has ended for this contest.' });
     }
 
-    // Get voter IP
-    const voterIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-                    req.connection?.remoteAddress ||
-                    req.socket?.remoteAddress ||
-                    req.ip;
-
-    // Check if this IP already voted in this contest
-    if (contest.allVoterIPs.includes(voterIP)) {
+    // Check if this token already voted in this contest
+    if (contest.allVoterTokens.includes(visitorToken)) {
       return res.status(403).json({ message: 'You have already voted in this contest.', alreadyVoted: true });
     }
 
     // Apply vote
     if (side === 'A') {
       contest.contestantA.votes += 1;
-      contest.contestantA.voterIPs.push(voterIP);
+      contest.contestantA.voterTokens.push(visitorToken);
     } else {
       contest.contestantB.votes += 1;
-      contest.contestantB.voterIPs.push(voterIP);
+      contest.contestantB.voterTokens.push(visitorToken);
     }
-    contest.allVoterIPs.push(voterIP);
+    contest.allVoterTokens.push(visitorToken);
 
     await contest.save();
 
@@ -183,22 +180,22 @@ router.post('/:id/vote', async (req, res) => {
   }
 });
 
-// GET check if an IP has voted in a contest
+// GET check if a visitor token has voted in a contest
 router.get('/:id/check-vote', async (req, res) => {
   try {
     const contest = await Contest.findById(req.params.id);
     if (!contest) return res.status(404).json({ message: 'Contest not found' });
 
-    const voterIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-                    req.connection?.remoteAddress ||
-                    req.socket?.remoteAddress ||
-                    req.ip;
+    const visitorToken = req.query.visitorToken || '';
+    if (!visitorToken) {
+      return res.json({ hasVoted: false, votedFor: null });
+    }
 
-    const hasVoted = contest.allVoterIPs.includes(voterIP);
+    const hasVoted = contest.allVoterTokens.includes(visitorToken);
     let votedFor = null;
     if (hasVoted) {
-      if (contest.contestantA.voterIPs.includes(voterIP)) votedFor = 'A';
-      else if (contest.contestantB.voterIPs.includes(voterIP)) votedFor = 'B';
+      if (contest.contestantA.voterTokens.includes(visitorToken)) votedFor = 'A';
+      else if (contest.contestantB.voterTokens.includes(visitorToken)) votedFor = 'B';
     }
 
     res.json({ hasVoted, votedFor });
