@@ -84,9 +84,27 @@ mongoose.connect(process.env.MONGODB_URI)
       await Admin.create({
         email: process.env.ADMIN_EMAIL,
         password: process.env.ADMIN_PASSWORD,
-        name: 'Admin'
+        name: 'Admin',
+        role: 'admin'
       });
       console.log('Default admin created');
+    } else if (!existing.role) {
+      existing.role = 'admin';
+      await existing.save();
+      console.log('Updated existing admin with role');
+    }
+    // Seed sarpanch user if configured
+    if (process.env.SARPANCH_EMAIL) {
+      const sarpanchExists = await Admin.findOne({ email: process.env.SARPANCH_EMAIL });
+      if (!sarpanchExists) {
+        await Admin.create({
+          email: process.env.SARPANCH_EMAIL,
+          password: process.env.SARPANCH_PASSWORD || 'sarpanch123',
+          name: 'Sarpanch',
+          role: 'sarpanch'
+        });
+        console.log('Default sarpanch created');
+      }
     }
     app.listen(process.env.PORT || 5000, () => {
       console.log(`Server running on port ${process.env.PORT || 5000}`);
