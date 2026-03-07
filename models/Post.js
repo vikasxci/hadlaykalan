@@ -6,6 +6,9 @@ const postSchema = new mongoose.Schema({
   content: { type: String, required: true },
   profilePic: { type: String }, // Cloudinary URL
   profilePicCloudinaryId: { type: String },
+  postImage: { type: String }, // Post photo / image URL
+  postImageCloudinaryId: { type: String },
+  editToken: { type: String }, // Token for user to edit their own post
   likes: { type: Number, default: 0 },
   likedIPs: [{ type: String }], // Track IPs that liked
   isApproved: { type: Boolean, default: true },
