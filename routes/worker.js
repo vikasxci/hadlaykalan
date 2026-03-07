@@ -234,13 +234,15 @@ router.post('/posts', workerAuth, async (req, res) => {
 // Get all active work posts - filtered by viewer's userType
 router.get('/posts', async (req, res) => {
   try {
-    const { workType, paymentType, viewerType } = req.query;
+    const { workType, paymentType, viewerType, postType } = req.query;
     const filter = { status: 'active', isApproved: true };
     
     if (viewerType === 'worker') {
       filter.postType = 'need_worker';
     } else if (viewerType === 'employer') {
       filter.postType = 'available_worker';
+    } else if (postType === 'need_worker' || postType === 'available_worker') {
+      filter.postType = postType;
     }
     
     if (workType && workType !== 'all') filter.workType = workType;
