@@ -43,7 +43,7 @@ router.post('/', upload.fields([
   { name: 'postImage', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { name, title, content } = req.body;
+    const { name, title, content, topic } = req.body;
     if (!name || !title || !content) {
       return res.status(400).json({ message: 'Name, title and content are required' });
     }
@@ -55,6 +55,7 @@ router.post('/', upload.fields([
       name: name.trim(),
       title: title.trim(),
       content: content.trim(),
+      topic: topic && ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'other'].includes(topic) ? topic : 'message',
       editToken
     };
 
