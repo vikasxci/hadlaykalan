@@ -12,6 +12,7 @@ router.get('/', async (req, res) => {
     const posts = await Post.find({ isApproved: true }).sort({ createdAt: -1 });
     const sanitized = posts.map(p => {
       const obj = p.toObject();
+      delete obj.likedTokens;
       delete obj.likedIPs;
       delete obj.editToken;
       return obj;
@@ -28,6 +29,7 @@ router.get('/:id', async (req, res) => {
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ message: 'Post not found' });
     const obj = post.toObject();
+    delete obj.likedTokens;
     delete obj.likedIPs;
     delete obj.editToken;
     res.json(obj);
@@ -82,43 +84,82 @@ router.post('/', upload.fields([
   }
 });
 
-// POST like a post (by IP)
+// Helper function to get client IP address
+function getClientIP(req) {
+  return (
+    req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+    req.headers['x-real-ip'] ||
+    req.connection.remoteAddress ||
+    req.socket.remoteAddress ||
+    req.ip ||
+    'unknown'
+  );
+}
+
+// POST like a post (token & IP validation)
 router.post('/:id/like', async (req, res) => {
   try {
+    const { visitorToken } = req.body;
+    if (!visitorToken) {
+      return res.status(400).json({ message: 'Visitor token is required to like a post.' });
+    }
+
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ message: 'Post not found' });
 
-    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip;
-    const clientIP = ip.split(',')[0].trim();
+    const clientIP = getClientIP(req);
 
-    if (post.likedIPs.includes(clientIP)) {
-      // Unlike
+    // Check if this token already liked the post
+    if (post.likedTokens.includes(visitorToken)) {
+      // Unlike - remove token and IP
+      post.likedTokens = post.likedTokens.filter(t => t !== visitorToken);
       post.likedIPs = post.likedIPs.filter(i => i !== clientIP);
       post.likes = Math.max(0, post.likes - 1);
       await post.save();
       return res.json({ likes: post.likes, liked: false });
     }
 
-    // Like
+    // Check if this IP already liked the post
+    if (post.likedIPs.includes(clientIP)) {
+      return res.status(403).json({ 
+        message: 'A like from your IP address has already been recorded for this post.',
+        alreadyLiked: true,
+        reason: 'ip'
+      });
+    }
+
+    // Apply like
+    post.likedTokens.push(visitorToken);
     post.likedIPs.push(clientIP);
     post.likes += 1;
     await post.save();
+
     res.json({ likes: post.likes, liked: true });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// GET check if IP has liked a post
+// GET check if visitor token or IP has liked a post
 router.get('/:id/check-like', async (req, res) => {
   try {
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ message: 'Post not found' });
 
-    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip;
-    const clientIP = ip.split(',')[0].trim();
+    const visitorToken = req.query.visitorToken || '';
+    const clientIP = getClientIP(req);
 
-    res.json({ liked: post.likedIPs.includes(clientIP) });
+    // Check if token has liked
+    const tokenHasLiked = visitorToken && post.likedTokens.includes(visitorToken);
+    
+    // Check if IP has liked
+    const ipHasLiked = post.likedIPs.includes(clientIP);
+
+    res.json({ 
+      liked: tokenHasLiked || ipHasLiked,
+      blockedByToken: tokenHasLiked,
+      blockedByIP: ipHasLiked
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
