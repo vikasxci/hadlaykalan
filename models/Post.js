@@ -15,6 +15,7 @@ const postSchema = new mongoose.Schema({
   postImageCloudinaryId: { type: String },
   editToken: { type: String }, // Token for user to edit their own post
   likes: { type: Number, default: 0 },
+  likedTokens: [{ type: String }], // Track visitor tokens that liked
   likedIPs: [{ type: String }], // Track IPs that liked
   isApproved: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
