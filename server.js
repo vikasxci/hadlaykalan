@@ -106,6 +106,18 @@ mongoose.connect(process.env.MONGODB_URI)
         console.log('Default sarpanch created');
       }
     }
+    // Seed contest admin user
+    const contestAdminEmail = 'contest.admin@hadlaykalan.com';
+    const contestAdminExists = await Admin.findOne({ email: contestAdminEmail });
+    if (!contestAdminExists) {
+      await Admin.create({
+        email: contestAdminEmail,
+        password: 'constest@0012',
+        name: 'Contest Admin',
+        role: 'contest_admin'
+      });
+      console.log('Default contest admin created');
+    }
     app.listen(process.env.PORT || 5000, () => {
       console.log(`Server running on port ${process.env.PORT || 5000}`);
     });
