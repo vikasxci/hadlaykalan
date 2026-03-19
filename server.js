@@ -40,6 +40,7 @@ app.use('/api/posts', require('./routes/posts'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/visitors', require('./routes/visitors'));
 app.use('/api/worker', require('./routes/worker'));
+app.use('/api/mcs', require('./routes/mcs'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
@@ -67,7 +68,8 @@ app.get('/', (req, res) => {
       villageInfo: '/api/village-info',
       contest: '/api/contest',
       posts: '/api/posts',
-      settings: '/api/settings'
+      settings: '/api/settings',
+      mcs: '/api/mcs'
     },
     note: 'Frontend is deployed separately'
   });
