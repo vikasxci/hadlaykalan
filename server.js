@@ -40,6 +40,7 @@ app.use('/api/posts', require('./routes/posts'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/visitors', require('./routes/visitors'));
 app.use('/api/worker', require('./routes/worker'));
+app.use('/api/market', require('./routes/market'));
 app.use('/api/mcs', require('./routes/mcs'));
 
 // Health check endpoint for deployment monitoring
