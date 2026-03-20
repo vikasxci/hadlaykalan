@@ -78,6 +78,11 @@ router.post('/track', async (req, res) => {
       if (referrer) visitor.referrer = referrer;
       if (platform) visitor.platform = platform;
       if (page && !visitor.pages.includes(page)) visitor.pages.push(page);
+      
+      // Track IP address (add if not already present)
+      if (ip && ip !== 'unknown' && !visitor.ipAddresses.includes(ip)) {
+        visitor.ipAddresses.push(ip);
+      }
 
       // Re-issue JWT if visitor had old-format token (migration)
       if (visitor.visitorToken && !visitor.visitorToken.startsWith('eyJ')) {
@@ -128,6 +133,7 @@ router.post('/track', async (req, res) => {
         visitorToken: newToken,
         visitorName: visitorName,
         userAgent: ua,
+        ipAddresses: ip && ip !== 'unknown' ? [ip] : [],
         ...parsed,
         screenWidth: screenWidth || null,
         screenHeight: screenHeight || null,
@@ -249,6 +255,7 @@ router.post('/verify-otp', async (req, res) => {
 });
 
 // GET - Total visitor count (public)
+// Returns unique IP count for public display, new visitors for admin
 router.get('/count', async (req, res) => {
   try {
     const totalVisitors = await Visitor.countDocuments();
@@ -256,7 +263,23 @@ router.get('/count', async (req, res) => {
     todayStart.setHours(0, 0, 0, 0);
     const todayVisitors = await Visitor.countDocuments({ lastVisit: { $gte: todayStart } });
     const registeredCount = await Visitor.countDocuments({ isRegistered: true });
-    res.json({ totalVisitors, todayVisitors, registeredCount });
+    
+    // Count unique IP addresses across all visitors
+    const uniqueIPs = await Visitor.aggregate([
+      { $unwind: '$ipAddresses' },
+      { $match: { ipAddresses: { $ne: null, $ne: 'unknown' } } },
+      { $group: { _id: '$ipAddresses' } },
+      { $count: 'uniqueIPCount' }
+    ]);
+    
+    const ipCount = uniqueIPs.length > 0 ? uniqueIPs[0].uniqueIPCount : 0;
+    
+    res.json({ 
+      totalVisitors,      // For backward compatibility 
+      todayVisitors, 
+      registeredCount,
+      uniqueIPCount: ipCount  // NEW: Unique IP address count for public UI
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
