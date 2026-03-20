@@ -255,7 +255,7 @@ router.post('/verify-otp', async (req, res) => {
 });
 
 // GET - Total visitor count (public)
-// Returns unique IP count for public display, new visitors for admin
+// Returns sum of all visitCounts for public display
 router.get('/count', async (req, res) => {
   try {
     const totalVisitors = await Visitor.countDocuments();
@@ -264,21 +264,18 @@ router.get('/count', async (req, res) => {
     const todayVisitors = await Visitor.countDocuments({ lastVisit: { $gte: todayStart } });
     const registeredCount = await Visitor.countDocuments({ isRegistered: true });
     
-    // Count unique IP addresses across all visitors
-    const uniqueIPs = await Visitor.aggregate([
-      { $unwind: '$ipAddresses' },
-      { $match: { ipAddresses: { $ne: null, $ne: 'unknown' } } },
-      { $group: { _id: '$ipAddresses' } },
-      { $count: 'uniqueIPCount' }
+    // Sum total visitCount from all visitors
+    const totalVisitCountAgg = await Visitor.aggregate([
+      { $group: { _id: null, totalVisitCount: { $sum: '$visitCount' } } }
     ]);
     
-    const ipCount = uniqueIPs.length > 0 ? uniqueIPs[0].uniqueIPCount : 0;
+    const totalVisitCount = totalVisitCountAgg.length > 0 ? totalVisitCountAgg[0].totalVisitCount : 0;
     
     res.json({ 
-      totalVisitors,      // For backward compatibility 
+      totalVisitors,      // For backward compatibility (unique visitor records)
       todayVisitors, 
       registeredCount,
-      uniqueIPCount: ipCount  // NEW: Unique IP address count for public UI
+      totalVisitCount: totalVisitCount  // NEW: Sum of all visitCounts for public UI
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
