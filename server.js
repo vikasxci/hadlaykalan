@@ -45,6 +45,7 @@ app.use('/api/worker', require('./routes/worker'));
 app.use('/api/market', require('./routes/market'));
 app.use('/api/mcs', require('./routes/mcs'));
 app.use('/api/shop', require('./routes/shop'));
+app.use('/api/uptime', require('./routes/uptime'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
@@ -83,6 +84,9 @@ app.get('/', (req, res) => {
 mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
     console.log('MongoDB Connected');
+    // Start uptime monitor scheduler
+    const { startMonitorScheduler } = require('./services/monitorService');
+    startMonitorScheduler();
     // Seed admin user
     const Admin = require('./models/Admin');
     const existing = await Admin.findOne({ email: process.env.ADMIN_EMAIL });
