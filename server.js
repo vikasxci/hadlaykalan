@@ -3,6 +3,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
+const { WebSocketServer } = require('ws');
 const cloudinary = require('cloudinary').v2;
 
 const app = express();
@@ -42,6 +44,7 @@ app.use('/api/visitors', require('./routes/visitors'));
 app.use('/api/worker', require('./routes/worker'));
 app.use('/api/market', require('./routes/market'));
 app.use('/api/mcs', require('./routes/mcs'));
+app.use('/api/shop', require('./routes/shop'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
@@ -121,7 +124,35 @@ mongoose.connect(process.env.MONGODB_URI)
       });
       console.log('Default contest admin created');
     }
-    app.listen(process.env.PORT || 5000, () => {
+    const server = http.createServer(app);
+
+    // ── WebSocket server for real-time shop notifications ──
+    const wss = new WebSocketServer({ server, path: '/ws/shop' });
+    app.set('wss', wss);
+
+    const jwt = require('jsonwebtoken');
+    const ShopSeller = require('./models/ShopSeller');
+
+    wss.on('connection', async (ws, req) => {
+      // Authenticate seller from query token
+      try {
+        const url = new URL(req.url, `http://localhost`);
+        const token = url.searchParams.get('token');
+        if (token) {
+          const { sellerId } = jwt.verify(token, process.env.JWT_SECRET || 'hadlay-kalan-secret-key');
+          const seller = await ShopSeller.findById(sellerId);
+          if (seller && seller.token === token) {
+            ws.sellerId = String(sellerId);
+            ws.send(JSON.stringify({ type: 'CONNECTED', message: 'रियल-टाइम नोटिफिकेशन चालू है' }));
+          }
+        }
+      } catch { /* unauthenticated, still allow connection */ }
+
+      ws.on('close', () => { ws.sellerId = null; });
+      ws.on('error', () => {});
+    });
+
+    server.listen(process.env.PORT || 5000, () => {
       console.log(`Server running on port ${process.env.PORT || 5000}`);
     });
   })
