@@ -23,26 +23,38 @@ async function pingMonitor(monitorId) {
       try { url = new URL(monitor.url); } catch { return reject(new Error('Invalid URL')); }
 
       const requestLib = url.protocol === 'https:' ? https : http;
-      const options = {
-        hostname: url.hostname,
-        port: url.port || (url.protocol === 'https:' ? 443 : 80),
-        path: url.pathname + url.search,
-        method: 'HEAD',
-        timeout: 10000, // 10s timeout
-        headers: { 'User-Agent': 'UptimeMonitor/1.0' }
-      };
 
-      const req = requestLib.request(options, (res) => {
-        responseTime = Date.now() - start;
-        // Treat 2xx and 3xx as up
-        status = res.statusCode < 400 ? 'up' : 'down';
-        res.resume(); // discard body
-        resolve();
-      });
+      function doRequest(method) {
+        const options = {
+          hostname: url.hostname,
+          port: url.port || (url.protocol === 'https:' ? 443 : 80),
+          path: url.pathname + url.search,
+          method,
+          timeout: 10000,
+          headers: { 'User-Agent': 'UptimeMonitor/1.0' }
+        };
 
-      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-      req.on('error', reject);
-      req.end();
+        const req = requestLib.request(options, (res) => {
+          res.resume(); // discard body
+          // If HEAD returned 4xx/5xx, retry with GET (some servers reject HEAD)
+          if (method === 'HEAD' && res.statusCode >= 400) {
+            return doRequest('GET');
+          }
+          responseTime = Date.now() - start;
+          status = res.statusCode < 400 ? 'up' : 'down';
+          resolve();
+        });
+
+        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+        req.on('error', (err) => {
+          // If HEAD errored out, retry with GET
+          if (method === 'HEAD') return doRequest('GET');
+          reject(err);
+        });
+        req.end();
+      }
+
+      doRequest('HEAD');
     });
   } catch {
     responseTime = null;
