@@ -31,7 +31,10 @@ async function pingMonitor(monitorId) {
           path: url.pathname + url.search,
           method,
           timeout: 10000,
-          headers: { 'User-Agent': 'UptimeMonitor/1.0' }
+          headers: { 'User-Agent': 'UptimeMonitor/1.0' },
+          // Allow sites with government/private CA certificates (e.g. NIC CA)
+          // that are not in Node.js's default trust store
+          rejectUnauthorized: false
         };
 
         const req = requestLib.request(options, (res) => {
