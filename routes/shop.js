@@ -120,10 +120,10 @@ router.get('/seller/dashboard', sellerAuth, async (req, res) => {
     const totalViews  = products.reduce((s, p) => s + p.totalViews,  0);
     const activeProducts = products.filter(p => p.isActive).length;
 
-    // Recent clicks (last 20 across all products)
+    // Recent clicks (last 100 across all products)
     const recent = products.flatMap(p => p.clicks.map(c => ({
       productId: p._id, productTitle: p.title, ...c.toObject()
-    }))).sort((a, b) => new Date(b.clickedAt) - new Date(a.clickedAt)).slice(0, 20);
+    }))).sort((a, b) => new Date(b.clickedAt) - new Date(a.clickedAt)).slice(0, 100);
 
     res.json({ totalClicks, totalViews, totalProducts: products.length, activeProducts, products, recentClicks: recent });
   } catch (err) {
@@ -287,6 +287,100 @@ router.post('/products/:id/click', async (req, res) => {
     res.json({ message: 'क्लिक दर्ज' });
   } catch (err) {
     res.status(500).json({ message: 'क्लिक दर्ज में त्रुटि' });
+  }
+});
+
+const adminAuth = require('../middleware/auth');
+
+// ═══════════════════ ADMIN (super-admin) ROUTES ══════════════════
+
+// GET /api/shop/admin/sellers  — all registered sellers
+router.get('/admin/sellers', adminAuth, async (req, res) => {
+  try {
+    const sellers = await ShopSeller.find({})
+      .select('-password -token')
+      .sort({ createdAt: -1 });
+    // Attach product count per seller
+    const withCounts = await Promise.all(sellers.map(async s => {
+      const count = await ShopProduct.countDocuments({ seller: s._id });
+      const clicks = await ShopProduct.aggregate([
+        { $match: { seller: s._id } },
+        { $group: { _id: null, total: { $sum: '$totalClicks' } } }
+      ]);
+      return { ...s.toObject(), productCount: count, totalClicks: clicks[0]?.total || 0 };
+    }));
+    res.json(withCounts);
+  } catch (err) {
+    res.status(500).json({ message: 'Sellers load error' });
+  }
+});
+
+// PUT /api/shop/admin/sellers/:id/status  — toggle seller active/inactive
+router.put('/admin/sellers/:id/status', adminAuth, async (req, res) => {
+  try {
+    const seller = await ShopSeller.findById(req.params.id);
+    if (!seller) return res.status(404).json({ message: 'Seller not found' });
+    seller.isActive = !seller.isActive;
+    await seller.save();
+    res.json({ message: `Seller ${seller.isActive ? 'activated' : 'deactivated'}`, isActive: seller.isActive });
+  } catch (err) {
+    res.status(500).json({ message: 'Status update error' });
+  }
+});
+
+// DELETE /api/shop/admin/sellers/:id  — delete seller + their products
+router.delete('/admin/sellers/:id', adminAuth, async (req, res) => {
+  try {
+    await ShopProduct.deleteMany({ seller: req.params.id });
+    const del = await ShopSeller.findByIdAndDelete(req.params.id);
+    if (!del) return res.status(404).json({ message: 'Seller not found' });
+    res.json({ message: 'Seller and their products deleted' });
+  } catch (err) {
+    res.status(500).json({ message: 'Delete error' });
+  }
+});
+
+// GET /api/shop/admin/products  — all products with seller info
+router.get('/admin/products', adminAuth, async (req, res) => {
+  try {
+    const { search, category, seller } = req.query;
+    const filter = {};
+    if (category && category !== 'all') filter.category = category;
+    if (seller) filter.seller = seller;
+    if (search) filter.$or = [
+      { title: { $regex: search, $options: 'i' } },
+      { description: { $regex: search, $options: 'i' } }
+    ];
+    const products = await ShopProduct.find(filter)
+      .populate('seller', 'name shopName phone email address photo isActive')
+      .sort({ createdAt: -1 });
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ message: 'Products load error' });
+  }
+});
+
+// PUT /api/shop/admin/products/:id/status  — toggle product active/inactive
+router.put('/admin/products/:id/status', adminAuth, async (req, res) => {
+  try {
+    const product = await ShopProduct.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+    product.isActive = !product.isActive;
+    await product.save();
+    res.json({ message: `Product ${product.isActive ? 'activated' : 'deactivated'}`, isActive: product.isActive });
+  } catch (err) {
+    res.status(500).json({ message: 'Status update error' });
+  }
+});
+
+// DELETE /api/shop/admin/products/:id  — delete any product
+router.delete('/admin/products/:id', adminAuth, async (req, res) => {
+  try {
+    const del = await ShopProduct.findByIdAndDelete(req.params.id);
+    if (!del) return res.status(404).json({ message: 'Product not found' });
+    res.json({ message: 'Product deleted' });
+  } catch (err) {
+    res.status(500).json({ message: 'Delete error' });
   }
 });
 
