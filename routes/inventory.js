@@ -1,0 +1,680 @@
+const express  = require('express');
+const router   = express.Router();
+const jwt      = require('jsonwebtoken');
+const mongoose = require('mongoose');
+const upload   = require('../middleware/upload');
+const inventoryAuth = require('../middleware/inventoryAuth');
+
+const InventoryBusiness         = require('../models/InventoryBusiness');
+const InventoryCategory         = require('../models/InventoryCategory');
+const InventorySupplier         = require('../models/InventorySupplier');
+const InventoryItem             = require('../models/InventoryItem');
+const InventoryStockTransaction = require('../models/InventoryStockTransaction');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'hadlay-kalan-secret-key';
+
+// ─── Utility ────────────────────────────────────────────────────────────────
+function slugify(text) {
+  return text.toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .substring(0, 50);
+}
+
+function makeToken(businessId) {
+  return jwt.sign({ businessId }, JWT_SECRET, { expiresIn: '30d' });
+}
+
+// ═══════════════════════════ AUTH ═══════════════════════════════════════════
+
+// POST /api/inventory/register
+router.post('/register', upload.single('logo'), async (req, res) => {
+  try {
+    const {
+      ownerName, businessName, email, phone, password,
+      businessType, description, gstin, pan, licenseNo,
+      street, city, state, pincode, country,
+      currency, lowStockThreshold, defaultTaxRate, registrationSource
+    } = req.body;
+
+    if (!ownerName || !businessName || !email || !phone || !password) {
+      return res.status(400).json({ message: 'Owner name, business name, email, phone and password are required.' });
+    }
+
+    const existing = await InventoryBusiness.findOne({ $or: [{ email: email.toLowerCase() }, { phone: phone.trim() }] });
+    if (existing) {
+      return res.status(400).json({ message: 'An account with this email or phone already exists.' });
+    }
+
+    // Generate unique slug
+    let baseSlug = slugify(businessName);
+    let slug = baseSlug;
+    let counter = 1;
+    while (await InventoryBusiness.findOne({ slug })) {
+      slug = `${baseSlug}-${counter++}`;
+    }
+
+    const logo = req.file ? (req.file.path || req.file.secure_url || '') : '';
+
+    const business = await InventoryBusiness.create({
+      ownerName: ownerName.trim(),
+      businessName: businessName.trim(),
+      slug,
+      email: email.toLowerCase().trim(),
+      phone: phone.trim(),
+      password,
+      businessType: businessType || 'retail',
+      description,
+      logo,
+      gstin, pan, licenseNo,
+      address: { street, city, state, pincode, country: country || 'India' },
+      currency: currency || 'INR',
+      currencySymbol: currency === 'USD' ? '$' : currency === 'EUR' ? '€' : '₹',
+      lowStockThreshold: Number(lowStockThreshold) || 5,
+      defaultTaxRate: Number(defaultTaxRate) || 18,
+      registrationSource: registrationSource || 'web'
+    });
+
+    const token = makeToken(business._id);
+    business.token = token;
+    await business.save();
+
+    res.status(201).json({
+      message: 'Business registered successfully.',
+      token,
+      business: { _id: business._id, ownerName: business.ownerName, businessName: business.businessName, slug: business.slug, logo: business.logo }
+    });
+  } catch (err) {
+    console.error('Inventory register error:', err);
+    res.status(500).json({ message: 'Registration failed. Please try again.' });
+  }
+});
+
+// POST /api/inventory/login
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
+
+    const business = await InventoryBusiness.findOne({ email: email.toLowerCase().trim() });
+    if (!business) return res.status(401).json({ message: 'Invalid email or password.' });
+    if (!business.isActive) return res.status(403).json({ message: 'Account is inactive.' });
+
+    const ok = await business.comparePassword(password);
+    if (!ok) return res.status(401).json({ message: 'Invalid email or password.' });
+
+    const token = makeToken(business._id);
+    business.token = token;
+    business.lastLoginAt = new Date();
+    business.loginCount  = (business.loginCount || 0) + 1;
+    await business.save();
+
+    res.json({
+      token,
+      business: {
+        _id: business._id, ownerName: business.ownerName,
+        businessName: business.businessName, slug: business.slug,
+        logo: business.logo, currency: business.currency,
+        currencySymbol: business.currencySymbol,
+        lowStockThreshold: business.lowStockThreshold
+      }
+    });
+  } catch (err) {
+    console.error('Inventory login error:', err);
+    res.status(500).json({ message: 'Login failed. Please try again.' });
+  }
+});
+
+// GET /api/inventory/me  (verify session)
+router.get('/me', inventoryAuth, (req, res) => {
+  res.json({ business: req.business });
+});
+
+// POST /api/inventory/logout
+router.post('/logout', inventoryAuth, async (req, res) => {
+  try {
+    req.business.token = null;
+    await req.business.save();
+    res.json({ message: 'Logged out.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/inventory/slug/:slug  (check slug availability / public profile)
+router.get('/slug/:slug', async (req, res) => {
+  const business = await InventoryBusiness.findOne({ slug: req.params.slug }).select('-password -token');
+  if (!business) return res.status(404).json({ message: 'Business not found.' });
+  res.json({ business });
+});
+
+// ═══════════════════════════ BUSINESS PROFILE ════════════════════════════════
+
+// PUT /api/inventory/profile
+router.put('/profile', inventoryAuth, upload.single('logo'), async (req, res) => {
+  try {
+    const {
+      ownerName, businessName, description, businessType,
+      street, city, state, pincode, country,
+      gstin, pan, licenseNo, phone, website,
+      currency, lowStockThreshold, defaultTaxRate, defaultTaxType,
+      fiscalYearStart
+    } = req.body;
+
+    const business = req.business;
+
+    if (ownerName)    business.ownerName    = ownerName.trim();
+    if (businessName) business.businessName = businessName.trim();
+    if (description)  business.description  = description;
+    if (businessType) business.businessType = businessType;
+    if (phone)        business.phone        = phone.trim();
+    if (website)      business.website      = website.trim();
+    if (gstin)        business.gstin        = gstin.trim();
+    if (pan)          business.pan          = pan.trim();
+    if (licenseNo)    business.licenseNo    = licenseNo.trim();
+    if (fiscalYearStart) business.fiscalYearStart = fiscalYearStart;
+
+    if (street || city || state || pincode || country) {
+      business.address = {
+        street:  street  || business.address?.street,
+        city:    city    || business.address?.city,
+        state:   state   || business.address?.state,
+        pincode: pincode || business.address?.pincode,
+        country: country || business.address?.country || 'India'
+      };
+    }
+
+    if (currency) {
+      business.currency       = currency;
+      business.currencySymbol = currency === 'USD' ? '$' : currency === 'EUR' ? '€' : '₹';
+    }
+    if (lowStockThreshold !== undefined) business.lowStockThreshold = Number(lowStockThreshold);
+    if (defaultTaxRate    !== undefined) business.defaultTaxRate    = Number(defaultTaxRate);
+    if (defaultTaxType)   business.defaultTaxType = defaultTaxType;
+
+    if (req.file) business.logo = req.file.path || req.file.secure_url || '';
+
+    await business.save();
+    res.json({ message: 'Profile updated.', business });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ DASHBOARD ══════════════════════════════════════
+
+// GET /api/inventory/dashboard
+router.get('/dashboard', inventoryAuth, async (req, res) => {
+  try {
+    const bId = req.business._id;
+
+    const [
+      totalItems,
+      lowStockItems,
+      outOfStockItems,
+      totalCategories,
+      totalSuppliers,
+      recentTransactions
+    ] = await Promise.all([
+      InventoryItem.countDocuments({ business: bId, isActive: true }),
+      InventoryItem.countDocuments({ business: bId, isActive: true, $expr: { $and: [{ $gt: ['$currentStock', 0] }, { $lte: ['$currentStock', '$minStock'] }] } }),
+      InventoryItem.countDocuments({ business: bId, isActive: true, currentStock: { $lte: 0 }, isService: false }),
+      InventoryCategory.countDocuments({ business: bId, isActive: true }),
+      InventorySupplier.countDocuments({ business: bId, isActive: true }),
+      InventoryStockTransaction.find({ business: bId }).sort({ createdAt: -1 }).limit(10)
+        .populate('item', 'name sku unit').lean()
+    ]);
+
+    // Total inventory value (cost)
+    const valueAgg = await InventoryItem.aggregate([
+      { $match: { business: bId, isActive: true } },
+      { $group: { _id: null, totalCostValue: { $sum: { $multiply: ['$currentStock', '$costPrice'] } }, totalSellValue: { $sum: { $multiply: ['$currentStock', '$sellingPrice'] } } } }
+    ]);
+    const { totalCostValue = 0, totalSellValue = 0 } = valueAgg[0] || {};
+
+    // Top 5 low stock items
+    const lowStockList = await InventoryItem.find({
+      business: bId, isActive: true, isService: false,
+      $expr: { $lte: ['$currentStock', '$minStock'] }
+    }).sort({ currentStock: 1 }).limit(5).populate('category', 'name').lean();
+
+    // Last 30-day sales summary
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const salesAgg = await InventoryStockTransaction.aggregate([
+      { $match: { business: bId, type: 'sale', createdAt: { $gte: thirtyDaysAgo } } },
+      { $group: { _id: null, totalQty: { $sum: '$quantity' }, totalRevenue: { $sum: '$totalAmount' }, count: { $sum: 1 } } }
+    ]);
+    const { totalQty: soldQty30 = 0, totalRevenue: revenue30 = 0, count: salesCount30 = 0 } = salesAgg[0] || {};
+
+    // Category distribution
+    const categoryDist = await InventoryItem.aggregate([
+      { $match: { business: bId, isActive: true } },
+      { $group: { _id: '$category', count: { $sum: 1 } } },
+      { $lookup: { from: 'inventorycategories', localField: '_id', foreignField: '_id', as: 'cat' } },
+      { $project: { name: { $ifNull: [{ $arrayElemAt: ['$cat.name', 0] }, 'Uncategorized'] }, count: 1 } },
+      { $sort: { count: -1 } }, { $limit: 8 }
+    ]);
+
+    res.json({
+      stats: { totalItems, lowStockItems, outOfStockItems, totalCategories, totalSuppliers, totalCostValue, totalSellValue, potentialProfit: totalSellValue - totalCostValue },
+      sales30: { soldQty30, revenue30, salesCount30 },
+      recentTransactions,
+      lowStockList,
+      categoryDist
+    });
+  } catch (err) {
+    console.error('Dashboard error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ CATEGORIES ═════════════════════════════════════
+
+// GET /api/inventory/categories
+router.get('/categories', inventoryAuth, async (req, res) => {
+  const categories = await InventoryCategory.find({ business: req.business._id }).sort({ sortOrder: 1, name: 1 }).lean();
+  res.json(categories);
+});
+
+// POST /api/inventory/categories
+router.post('/categories', inventoryAuth, async (req, res) => {
+  try {
+    const { name, description, parentCategory, icon, color, sortOrder } = req.body;
+    if (!name) return res.status(400).json({ message: 'Category name is required.' });
+
+    const cat = await InventoryCategory.create({
+      business: req.business._id, name: name.trim(), description, parentCategory: parentCategory || null,
+      icon, color: color || '#6366f1', sortOrder: Number(sortOrder) || 0
+    });
+    res.status(201).json(cat);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/inventory/categories/:id
+router.put('/categories/:id', inventoryAuth, async (req, res) => {
+  try {
+    const cat = await InventoryCategory.findOneAndUpdate(
+      { _id: req.params.id, business: req.business._id },
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!cat) return res.status(404).json({ message: 'Category not found.' });
+    res.json(cat);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/inventory/categories/:id
+router.delete('/categories/:id', inventoryAuth, async (req, res) => {
+  try {
+    const inUse = await InventoryItem.countDocuments({ business: req.business._id, category: req.params.id });
+    if (inUse > 0) return res.status(400).json({ message: `Cannot delete: ${inUse} item(s) are using this category.` });
+    await InventoryCategory.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+    res.json({ message: 'Category deleted.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ SUPPLIERS ══════════════════════════════════════
+
+// GET /api/inventory/suppliers
+router.get('/suppliers', inventoryAuth, async (req, res) => {
+  const { search, page = 1, limit = 50 } = req.query;
+  const query = { business: req.business._id };
+  if (search) query.$or = [{ name: new RegExp(search, 'i') }, { companyName: new RegExp(search, 'i') }, { phone: new RegExp(search, 'i') }];
+
+  const suppliers = await InventorySupplier.find(query).sort({ name: 1 })
+    .skip((page - 1) * limit).limit(Number(limit)).lean();
+  const total = await InventorySupplier.countDocuments(query);
+  res.json({ suppliers, total, page: Number(page) });
+});
+
+// POST /api/inventory/suppliers
+router.post('/suppliers', inventoryAuth, async (req, res) => {
+  try {
+    const { name, phone } = req.body;
+    if (!name || !phone) return res.status(400).json({ message: 'Supplier name and phone are required.' });
+
+    const supplier = await InventorySupplier.create({ ...req.body, business: req.business._id, name: name.trim(), phone: phone.trim() });
+    res.status(201).json(supplier);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/inventory/suppliers/:id
+router.put('/suppliers/:id', inventoryAuth, async (req, res) => {
+  try {
+    const supplier = await InventorySupplier.findOneAndUpdate(
+      { _id: req.params.id, business: req.business._id },
+      { $set: req.body }, { new: true, runValidators: true }
+    );
+    if (!supplier) return res.status(404).json({ message: 'Supplier not found.' });
+    res.json(supplier);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/inventory/suppliers/:id
+router.delete('/suppliers/:id', inventoryAuth, async (req, res) => {
+  try {
+    await InventorySupplier.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+    res.json({ message: 'Supplier deleted.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ ITEMS ══════════════════════════════════════════
+
+// GET /api/inventory/items
+router.get('/items', inventoryAuth, async (req, res) => {
+  try {
+    const { search, category, status, lowStock, page = 1, limit = 30, sort = '-createdAt' } = req.query;
+    const query = { business: req.business._id };
+
+    if (search) {
+      query.$or = [
+        { name: new RegExp(search, 'i') },
+        { sku: new RegExp(search, 'i') },
+        { barcode: new RegExp(search, 'i') },
+        { brand: new RegExp(search, 'i') },
+        { tags: new RegExp(search, 'i') }
+      ];
+    }
+    if (category && mongoose.Types.ObjectId.isValid(category)) query.category = category;
+    if (status === 'active')   query.isActive = true;
+    if (status === 'inactive') query.isActive = false;
+    if (lowStock === 'true')   query.$expr = { $lte: ['$currentStock', '$minStock'] };
+
+    const [items, total] = await Promise.all([
+      InventoryItem.find(query)
+        .populate('category', 'name color icon')
+        .populate('preferredSupplier', 'name phone')
+        .sort(sort)
+        .skip((+page - 1) * +limit)
+        .limit(+limit)
+        .lean(),
+      InventoryItem.countDocuments(query)
+    ]);
+
+    res.json({ items, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch (err) {
+    console.error('Items list error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/inventory/items/:id
+router.get('/items/:id', inventoryAuth, async (req, res) => {
+  const item = await InventoryItem.findOne({ _id: req.params.id, business: req.business._id })
+    .populate('category', 'name color icon')
+    .populate('preferredSupplier', 'name phone company')
+    .lean();
+  if (!item) return res.status(404).json({ message: 'Item not found.' });
+  res.json(item);
+});
+
+// POST /api/inventory/items
+router.post('/items', inventoryAuth, upload.array('images', 5), async (req, res) => {
+  try {
+    const { name, sellingPrice } = req.body;
+    if (!name) return res.status(400).json({ message: 'Item name is required.' });
+
+    const images = req.files ? req.files.map(f => f.path || f.secure_url || '') : [];
+
+    // Parse nested fields that may come as JSON strings
+    let dimensions = req.body.dimensions;
+    if (typeof dimensions === 'string') { try { dimensions = JSON.parse(dimensions); } catch { dimensions = {}; } }
+
+    const itemData = {
+      ...req.body,
+      business: req.business._id,
+      images,
+      dimensions,
+      tags: req.body.tags ? (Array.isArray(req.body.tags) ? req.body.tags : req.body.tags.split(',').map(t => t.trim())) : [],
+      costPrice:       Number(req.body.costPrice)       || 0,
+      sellingPrice:    Number(req.body.sellingPrice)    || 0,
+      mrp:             req.body.mrp ? Number(req.body.mrp) : undefined,
+      currentStock:    Number(req.body.currentStock)    || 0,
+      openingStock:    Number(req.body.currentStock)    || 0,
+      minStock:        Number(req.body.minStock)        || 0,
+      maxStock:        req.body.maxStock ? Number(req.body.maxStock) : undefined,
+      reorderPoint:    Number(req.body.reorderPoint)    || 0,
+      reorderQty:      Number(req.body.reorderQty)      || 0,
+      taxRate:         Number(req.body.taxRate)         || 0,
+      discountPercent: Number(req.body.discountPercent) || 0,
+      leadTimeDays:    Number(req.body.leadTimeDays)    || 0,
+      weight:          req.body.weight ? Number(req.body.weight) : undefined
+    };
+
+    // Compute gross margin
+    if (itemData.costPrice > 0) {
+      itemData.grossMarginPercent = ((itemData.sellingPrice - itemData.costPrice) / itemData.costPrice * 100).toFixed(2);
+    }
+
+    const item = await InventoryItem.create(itemData);
+
+    // Create opening stock transaction if stock > 0
+    if (item.currentStock > 0) {
+      await InventoryStockTransaction.create({
+        business: req.business._id, item: item._id, type: 'opening',
+        quantity: item.currentStock, quantityBefore: 0, quantityAfter: item.currentStock,
+        unit: item.unit, unitPrice: item.costPrice,
+        totalAmount: item.currentStock * item.costPrice,
+        createdBy: req.business.ownerName, notes: 'Opening stock entry'
+      });
+    }
+
+    res.status(201).json(item);
+  } catch (err) {
+    console.error('Item create error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/inventory/items/:id
+router.put('/items/:id', inventoryAuth, upload.array('images', 5), async (req, res) => {
+  try {
+    const item = await InventoryItem.findOne({ _id: req.params.id, business: req.business._id });
+    if (!item) return res.status(404).json({ message: 'Item not found.' });
+
+    const updates = { ...req.body };
+
+    // Handle new images appended
+    if (req.files && req.files.length > 0) {
+      const newImages = req.files.map(f => f.path || f.secure_url || '');
+      updates.images = [...(item.images || []), ...newImages];
+    }
+
+    if (updates.tags && !Array.isArray(updates.tags)) {
+      updates.tags = updates.tags.split(',').map(t => t.trim());
+    }
+    ['costPrice', 'sellingPrice', 'mrp', 'currentStock', 'minStock', 'maxStock', 'reorderPoint', 'reorderQty', 'taxRate', 'discountPercent', 'leadTimeDays', 'weight'].forEach(f => {
+      if (updates[f] !== undefined) updates[f] = Number(updates[f]);
+    });
+
+    if (updates.costPrice > 0) {
+      updates.grossMarginPercent = ((updates.sellingPrice - updates.costPrice) / updates.costPrice * 100).toFixed(2);
+    }
+    updates.lastStockUpdateAt = new Date();
+
+    Object.assign(item, updates);
+    await item.save();
+
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/inventory/items/:id  (soft delete)
+router.delete('/items/:id', inventoryAuth, async (req, res) => {
+  try {
+    const item = await InventoryItem.findOneAndUpdate(
+      { _id: req.params.id, business: req.business._id },
+      { isActive: false }, { new: true }
+    );
+    if (!item) return res.status(404).json({ message: 'Item not found.' });
+    res.json({ message: 'Item deactivated.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE /api/inventory/items/:id/image  (remove image by index)
+router.delete('/items/:id/image', inventoryAuth, async (req, res) => {
+  try {
+    const { index } = req.body;
+    const item = await InventoryItem.findOne({ _id: req.params.id, business: req.business._id });
+    if (!item) return res.status(404).json({ message: 'Item not found.' });
+    item.images.splice(Number(index), 1);
+    await item.save();
+    res.json({ images: item.images });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ STOCK TRANSACTIONS ══════════════════════════════
+
+// GET /api/inventory/transactions
+router.get('/transactions', inventoryAuth, async (req, res) => {
+  try {
+    const { itemId, type, page = 1, limit = 30, from, to } = req.query;
+    const query = { business: req.business._id };
+    if (itemId) query.item = itemId;
+    if (type)   query.type = type;
+    if (from || to) {
+      query.createdAt = {};
+      if (from) query.createdAt.$gte = new Date(from);
+      if (to)   query.createdAt.$lte = new Date(to);
+    }
+
+    const [txns, total] = await Promise.all([
+      InventoryStockTransaction.find(query)
+        .populate('item', 'name sku unit images')
+        .populate('supplier', 'name')
+        .sort({ createdAt: -1 })
+        .skip((+page - 1) * +limit)
+        .limit(+limit)
+        .lean(),
+      InventoryStockTransaction.countDocuments(query)
+    ]);
+
+    res.json({ transactions: txns, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /api/inventory/transactions  (stock in / out / adjust)
+router.post('/transactions', inventoryAuth, async (req, res) => {
+  try {
+    const {
+      itemId, type, quantity, unitPrice = 0, discount = 0, taxAmount = 0,
+      batchNo, lotNo, serialNo, manufactureDate, expiryDate, referenceNo,
+      supplier, supplierName, customerName, customerPhone, customerEmail, notes
+    } = req.body;
+
+    if (!itemId || !type || !quantity) {
+      return res.status(400).json({ message: 'Item, type and quantity are required.' });
+    }
+
+    const item = await InventoryItem.findOne({ _id: itemId, business: req.business._id });
+    if (!item) return res.status(404).json({ message: 'Item not found.' });
+
+    const qty = Math.abs(Number(quantity));
+    const isIn = ['purchase', 'adjustment_in', 'return_in', 'transfer_in', 'opening'].includes(type);
+    const isOut = ['sale', 'adjustment_out', 'return_out', 'transfer_out', 'damage', 'expired'].includes(type);
+
+    if (isOut && !item.allowNegativeStock && item.currentStock < qty) {
+      return res.status(400).json({ message: `Insufficient stock. Available: ${item.currentStock} ${item.unit}` });
+    }
+
+    const before = item.currentStock;
+    const after  = isIn ? before + qty : before - qty;
+
+    const totalAmount = (Number(unitPrice) * qty) - Number(discount) + Number(taxAmount);
+
+    const txn = await InventoryStockTransaction.create({
+      business: req.business._id, item: itemId, type, quantity: qty,
+      quantityBefore: before, quantityAfter: after, unit: item.unit,
+      unitPrice: Number(unitPrice), discount: Number(discount),
+      taxAmount: Number(taxAmount), totalAmount,
+      batchNo, lotNo, serialNo,
+      manufactureDate: manufactureDate ? new Date(manufactureDate) : undefined,
+      expiryDate: expiryDate ? new Date(expiryDate) : undefined,
+      referenceNo, supplier, supplierName, customerName, customerPhone, customerEmail,
+      notes, createdBy: req.business.ownerName
+    });
+
+    // Update item stock and analytics
+    item.currentStock = after;
+    item.lastStockUpdateAt = new Date();
+
+    if (isIn) {
+      item.totalPurchased = (item.totalPurchased || 0) + qty;
+      item.totalCost      = (item.totalCost || 0) + (Number(unitPrice) * qty);
+      item.lastPurchasedAt = new Date();
+      if (type === 'purchase') item.lastRestockedAt = new Date();
+    }
+    if (type === 'sale') {
+      item.totalSold    = (item.totalSold    || 0) + qty;
+      item.totalRevenue = (item.totalRevenue || 0) + totalAmount;
+      item.lastSoldAt   = new Date();
+    }
+
+    await item.save();
+    await txn.populate('item', 'name sku unit');
+    res.status(201).json(txn);
+  } catch (err) {
+    console.error('Transaction error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ REPORTS ════════════════════════════════════════
+
+// GET /api/inventory/reports/overview
+router.get('/reports/overview', inventoryAuth, async (req, res) => {
+  try {
+    const bId = req.business._id;
+    const { days = 30 } = req.query;
+    const since = new Date(Date.now() - Number(days) * 24 * 60 * 60 * 1000);
+
+    // Daily sales trend
+    const dailySales = await InventoryStockTransaction.aggregate([
+      { $match: { business: bId, type: 'sale', createdAt: { $gte: since } } },
+      { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, qty: { $sum: '$quantity' }, revenue: { $sum: '$totalAmount' }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } }
+    ]);
+
+    // Top selling items
+    const topItems = await InventoryStockTransaction.aggregate([
+      { $match: { business: bId, type: 'sale', createdAt: { $gte: since } } },
+      { $group: { _id: '$item', totalQty: { $sum: '$quantity' }, totalRevenue: { $sum: '$totalAmount' } } },
+      { $sort: { totalQty: -1 } }, { $limit: 10 },
+      { $lookup: { from: 'inventoryitems', localField: '_id', foreignField: '_id', as: 'item' } },
+      { $project: { name: { $arrayElemAt: ['$item.name', 0] }, sku: { $arrayElemAt: ['$item.sku', 0] }, totalQty: 1, totalRevenue: 1 } }
+    ]);
+
+    // Transaction type breakdown
+    const typeBreakdown = await InventoryStockTransaction.aggregate([
+      { $match: { business: bId, createdAt: { $gte: since } } },
+      { $group: { _id: '$type', count: { $sum: 1 }, totalAmount: { $sum: '$totalAmount' } } }
+    ]);
+
+    res.json({ dailySales, topItems, typeBreakdown });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+module.exports = router;
