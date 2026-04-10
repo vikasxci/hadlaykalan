@@ -46,6 +46,7 @@ app.use('/api/market', require('./routes/market'));
 app.use('/api/mcs', require('./routes/mcs'));
 app.use('/api/shop', require('./routes/shop'));
 app.use('/api/uptime', require('./routes/uptime'));
+app.use('/api/inventory', require('./routes/inventory'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
@@ -74,7 +75,8 @@ app.get('/', (req, res) => {
       contest: '/api/contest',
       posts: '/api/posts',
       settings: '/api/settings',
-      mcs: '/api/mcs'
+      mcs: '/api/mcs',
+      inventory: '/api/inventory'
     },
     note: 'Frontend is deployed separately'
   });
