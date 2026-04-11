@@ -1148,4 +1148,44 @@ router.delete('/invoices/:id', inventoryAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// ─── GET /api/inventory/search?q=&type=items|customers|both&limit=20 ─────────
+router.get('/search', inventoryAuth, async (req, res) => {
+  try {
+    const { q = '', type = 'both', limit = 20 } = req.query;
+    const bId = req.business._id;
+    const term = q.trim();
+    const results = {};
+
+    if (type === 'items' || type === 'both') {
+      const itemQuery = { business: bId, isActive: true };
+      if (term) {
+        const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        itemQuery.$or = [{ name: regex }, { sku: regex }, { barcode: regex }];
+      }
+      results.items = await InventoryItem.find(itemQuery)
+        .select('name sku barcode unit currentStock minStock sellingPrice costPrice')
+        .sort({ name: 1 })
+        .limit(Math.min(Number(limit), 100))
+        .lean();
+    }
+
+    if (type === 'customers' || type === 'both') {
+      const custQuery = { business: bId, isActive: true };
+      if (term) {
+        const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        custQuery.$or = [{ name: regex }, { phone: regex }, { email: regex }];
+      }
+      results.customers = await InventoryCustomer.find(custQuery)
+        .select('name phone email group')
+        .sort({ name: 1 })
+        .limit(Math.min(Number(limit), 100))
+        .lean();
+    }
+
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
