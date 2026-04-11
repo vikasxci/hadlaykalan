@@ -10,8 +10,28 @@ const InventoryCategory         = require('../models/InventoryCategory');
 const InventorySupplier         = require('../models/InventorySupplier');
 const InventoryItem             = require('../models/InventoryItem');
 const InventoryStockTransaction = require('../models/InventoryStockTransaction');
+const InventoryActivityLog      = require('../models/InventoryActivityLog');
+const adminAuth                 = require('../middleware/auth');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hadlay-kalan-secret-key';
+
+// ─── Activity Logger ────────────────────────────────────────────────────────
+async function logActivity(req, business, action, extras = {}) {
+  try {
+    await InventoryActivityLog.create({
+      business:     business._id,
+      businessName: business.businessName,
+      ownerEmail:   business.email,
+      action,
+      entity:     extras.entity     || null,
+      entityId:   extras.entityId   || null,
+      entityName: extras.entityName || null,
+      details:    extras.details    || null,
+      ip:         req.headers['x-forwarded-for']?.split(',')[0] || req.socket?.remoteAddress || '',
+      userAgent:  req.headers['user-agent'] || '',
+    });
+  } catch (e) { /* non-critical, never throw */ }
+}
 
 // ─── Utility ────────────────────────────────────────────────────────────────
 function slugify(text) {
@@ -80,6 +100,8 @@ router.post('/register', upload.single('logo'), async (req, res) => {
     business.token = token;
     await business.save();
 
+    logActivity(req, business, 'register', { details: { businessType: business.businessType, city: business.address?.city } });
+
     res.status(201).json({
       message: 'Business registered successfully.',
       token,
@@ -110,6 +132,8 @@ router.post('/login', async (req, res) => {
     business.loginCount  = (business.loginCount || 0) + 1;
     await business.save();
 
+    logActivity(req, business, 'login', { details: { loginCount: business.loginCount } });
+
     res.json({
       token,
       business: {
@@ -134,6 +158,7 @@ router.get('/me', inventoryAuth, (req, res) => {
 // POST /api/inventory/logout
 router.post('/logout', inventoryAuth, async (req, res) => {
   try {
+    logActivity(req, req.business, 'logout');
     req.business.token = null;
     await req.business.save();
     res.json({ message: 'Logged out.' });
@@ -287,6 +312,7 @@ router.post('/categories', inventoryAuth, async (req, res) => {
       business: req.business._id, name: name.trim(), description, parentCategory: parentCategory || null,
       icon, color: color || '#6366f1', sortOrder: Number(sortOrder) || 0
     });
+    logActivity(req, req.business, 'category_create', { entity: 'category', entityId: cat._id, entityName: cat.name });
     res.status(201).json(cat);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -302,6 +328,7 @@ router.put('/categories/:id', inventoryAuth, async (req, res) => {
       { new: true, runValidators: true }
     );
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
+    logActivity(req, req.business, 'category_update', { entity: 'category', entityId: cat._id, entityName: cat.name });
     res.json(cat);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -314,6 +341,7 @@ router.delete('/categories/:id', inventoryAuth, async (req, res) => {
     const inUse = await InventoryItem.countDocuments({ business: req.business._id, category: req.params.id });
     if (inUse > 0) return res.status(400).json({ message: `Cannot delete: ${inUse} item(s) are using this category.` });
     await InventoryCategory.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+    logActivity(req, req.business, 'category_delete', { entity: 'category', entityId: req.params.id, details: { id: req.params.id } });
     res.json({ message: 'Category deleted.' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -341,6 +369,7 @@ router.post('/suppliers', inventoryAuth, async (req, res) => {
     if (!name || !phone) return res.status(400).json({ message: 'Supplier name and phone are required.' });
 
     const supplier = await InventorySupplier.create({ ...req.body, business: req.business._id, name: name.trim(), phone: phone.trim() });
+    logActivity(req, req.business, 'supplier_create', { entity: 'supplier', entityId: supplier._id, entityName: supplier.name });
     res.status(201).json(supplier);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -355,6 +384,7 @@ router.put('/suppliers/:id', inventoryAuth, async (req, res) => {
       { $set: req.body }, { new: true, runValidators: true }
     );
     if (!supplier) return res.status(404).json({ message: 'Supplier not found.' });
+    logActivity(req, req.business, 'supplier_update', { entity: 'supplier', entityId: supplier._id, entityName: supplier.name });
     res.json(supplier);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -365,6 +395,7 @@ router.put('/suppliers/:id', inventoryAuth, async (req, res) => {
 router.delete('/suppliers/:id', inventoryAuth, async (req, res) => {
   try {
     await InventorySupplier.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+    logActivity(req, req.business, 'supplier_delete', { entity: 'supplier', entityId: req.params.id, details: { id: req.params.id } });
     res.json({ message: 'Supplier deleted.' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -460,6 +491,7 @@ router.post('/items', inventoryAuth, upload.array('images', 5), async (req, res)
     }
 
     const item = await InventoryItem.create(itemData);
+    logActivity(req, req.business, 'item_create', { entity: 'item', entityId: item._id, entityName: item.name, details: { sku: item.sku, stock: item.currentStock } });
 
     // Create opening stock transaction if stock > 0
     if (item.currentStock > 0) {
@@ -507,7 +539,7 @@ router.put('/items/:id', inventoryAuth, upload.array('images', 5), async (req, r
 
     Object.assign(item, updates);
     await item.save();
-
+    logActivity(req, req.business, 'item_update', { entity: 'item', entityId: item._id, entityName: item.name });
     res.json(item);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -522,6 +554,7 @@ router.delete('/items/:id', inventoryAuth, async (req, res) => {
       { isActive: false }, { new: true }
     );
     if (!item) return res.status(404).json({ message: 'Item not found.' });
+    logActivity(req, req.business, 'item_delete', { entity: 'item', entityId: item._id, entityName: item.name });
     res.json({ message: 'Item deactivated.' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -633,6 +666,7 @@ router.post('/transactions', inventoryAuth, async (req, res) => {
 
     await item.save();
     await txn.populate('item', 'name sku unit');
+    logActivity(req, req.business, 'transaction_create', { entity: 'transaction', entityId: txn._id, entityName: item.name, details: { type, qty, unitPrice: Number(unitPrice), totalAmount } });
     res.status(201).json(txn);
   } catch (err) {
     console.error('Transaction error:', err);
@@ -672,6 +706,143 @@ router.get('/reports/overview', inventoryAuth, async (req, res) => {
     ]);
 
     res.json({ dailySales, topItems, typeBreakdown });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════ ADMIN MONITORING (Main Admin Panel) ═════════════
+// All routes below are protected by adminAuth (the Hadlay Kalan main admin JWT)
+
+// GET /api/inventory/admin/monitor  — overall summary for all businesses
+router.get('/admin/monitor', adminAuth, async (req, res) => {
+  try {
+    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const since7  = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000);
+
+    const [
+      totalBusinesses,
+      activeBusinesses,
+      newThisMonth,
+      totalItems,
+      totalTxns,
+      txnsThisWeek,
+      recentLogins,
+      businessList
+    ] = await Promise.all([
+      InventoryBusiness.countDocuments(),
+      InventoryBusiness.countDocuments({ isActive: true }),
+      InventoryBusiness.countDocuments({ createdAt: { $gte: since30 } }),
+      InventoryItem.countDocuments({ isActive: true }),
+      InventoryStockTransaction.countDocuments(),
+      InventoryStockTransaction.countDocuments({ createdAt: { $gte: since7 } }),
+      InventoryActivityLog.find({ action: 'login' })
+        .sort({ createdAt: -1 }).limit(30).lean(),
+      InventoryBusiness.find()
+        .select('-password -token')
+        .sort({ createdAt: -1 })
+        .lean()
+    ]);
+
+    // Per-business stats
+    const businessIds = businessList.map(b => b._id);
+    const [itemCounts, txnCounts, loginCounts] = await Promise.all([
+      InventoryItem.aggregate([
+        { $match: { business: { $in: businessIds }, isActive: true } },
+        { $group: { _id: '$business', count: { $sum: 1 } } }
+      ]),
+      InventoryStockTransaction.aggregate([
+        { $match: { business: { $in: businessIds } } },
+        { $group: { _id: '$business', count: { $sum: 1 } } }
+      ]),
+      InventoryActivityLog.aggregate([
+        { $match: { business: { $in: businessIds }, action: 'login' } },
+        { $group: { _id: '$business', count: { $sum: 1 }, last: { $max: '$createdAt' } } }
+      ])
+    ]);
+
+    const itemMap  = Object.fromEntries(itemCounts.map(x  => [x._id.toString(), x.count]));
+    const txnMap   = Object.fromEntries(txnCounts.map(x   => [x._id.toString(), x.count]));
+    const loginMap = Object.fromEntries(loginCounts.map(x => [x._id.toString(), { count: x.count, last: x.last }]));
+
+    const businesses = businessList.map(b => ({
+      ...b,
+      _itemCount:      itemMap[b._id.toString()]           || 0,
+      _txnCount:       txnMap[b._id.toString()]            || 0,
+      _loginCount:     loginMap[b._id.toString()]?.count   || b.loginCount || 0,
+      _lastLogin:      loginMap[b._id.toString()]?.last    || b.lastLoginAt
+    }));
+
+    res.json({
+      overview: { totalBusinesses, activeBusinesses, newThisMonth, totalItems, totalTxns, txnsThisWeek },
+      businesses,
+      recentLogins
+    });
+  } catch (err) {
+    console.error('Admin monitor error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/inventory/admin/activity?businessId=&action=&page=1&limit=50
+router.get('/admin/activity', adminAuth, async (req, res) => {
+  try {
+    const { businessId, action, page = 1, limit = 50 } = req.query;
+    const query = {};
+    if (businessId && mongoose.Types.ObjectId.isValid(businessId)) query.business = businessId;
+    if (action) query.action = action;
+
+    const [logs, total] = await Promise.all([
+      InventoryActivityLog.find(query)
+        .sort({ createdAt: -1 })
+        .skip((+page - 1) * +limit)
+        .limit(+limit)
+        .lean(),
+      InventoryActivityLog.countDocuments(query)
+    ]);
+
+    res.json({ logs, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /api/inventory/admin/business/:id  — single business detail + stats
+router.get('/admin/business/:id', adminAuth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ message: 'Invalid ID.' });
+
+    const business = await InventoryBusiness.findById(req.params.id).select('-password -token').lean();
+    if (!business) return res.status(404).json({ message: 'Business not found.' });
+
+    const bId = business._id;
+    const [items, categories, suppliers, txns, activityLogs] = await Promise.all([
+      InventoryItem.countDocuments({ business: bId, isActive: true }),
+      InventoryCategory.countDocuments({ business: bId }),
+      InventorySupplier.countDocuments({ business: bId }),
+      InventoryStockTransaction.countDocuments({ business: bId }),
+      InventoryActivityLog.find({ business: bId }).sort({ createdAt: -1 }).limit(50).lean()
+    ]);
+
+    const txnBreakdown = await InventoryStockTransaction.aggregate([
+      { $match: { business: bId } },
+      { $group: { _id: '$type', count: { $sum: 1 }, total: { $sum: '$totalAmount' } } }
+    ]);
+
+    res.json({ business, stats: { items, categories, suppliers, txns }, txnBreakdown, activityLogs });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PATCH /api/inventory/admin/business/:id/toggle  — activate / deactivate account
+router.patch('/admin/business/:id/toggle', adminAuth, async (req, res) => {
+  try {
+    const business = await InventoryBusiness.findById(req.params.id);
+    if (!business) return res.status(404).json({ message: 'Business not found.' });
+    business.isActive = !business.isActive;
+    await business.save();
+    res.json({ message: `Account ${business.isActive ? 'activated' : 'deactivated'}.`, isActive: business.isActive });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
