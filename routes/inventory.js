@@ -746,7 +746,7 @@ router.get('/admin/monitor', adminAuth, async (req, res) => {
 
     // Per-business stats
     const businessIds = businessList.map(b => b._id);
-    const [itemCounts, txnCounts, loginCounts] = await Promise.all([
+    const [itemCounts, txnCounts, loginCounts, revAgg] = await Promise.all([
       InventoryItem.aggregate([
         { $match: { business: { $in: businessIds }, isActive: true } },
         { $group: { _id: '$business', count: { $sum: 1 } } }
@@ -758,6 +758,10 @@ router.get('/admin/monitor', adminAuth, async (req, res) => {
       InventoryActivityLog.aggregate([
         { $match: { business: { $in: businessIds }, action: 'login' } },
         { $group: { _id: '$business', count: { $sum: 1 }, last: { $max: '$createdAt' } } }
+      ]),
+      InventoryStockTransaction.aggregate([
+        { $match: { business: { $in: businessIds } } },
+        { $group: { _id: '$type', total: { $sum: '$totalAmount' } } }
       ])
     ]);
 
@@ -765,16 +769,21 @@ router.get('/admin/monitor', adminAuth, async (req, res) => {
     const txnMap   = Object.fromEntries(txnCounts.map(x   => [x._id.toString(), x.count]));
     const loginMap = Object.fromEntries(loginCounts.map(x => [x._id.toString(), { count: x.count, last: x.last }]));
 
+    // Revenue totals
+    const revMap = Object.fromEntries(revAgg.map(r => [r._id, r.total || 0]));
+    const totalPurchaseValue = revMap['purchase'] || 0;
+    const totalSaleValue     = revMap['sale']     || 0;
+
     const businesses = businessList.map(b => ({
       ...b,
-      _itemCount:      itemMap[b._id.toString()]           || 0,
-      _txnCount:       txnMap[b._id.toString()]            || 0,
-      _loginCount:     loginMap[b._id.toString()]?.count   || b.loginCount || 0,
-      _lastLogin:      loginMap[b._id.toString()]?.last    || b.lastLoginAt
+      _itemCount:  itemMap[b._id.toString()]           || 0,
+      _txnCount:   txnMap[b._id.toString()]            || 0,
+      _loginCount: loginMap[b._id.toString()]?.count   || b.loginCount || 0,
+      _lastLogin:  loginMap[b._id.toString()]?.last    || b.lastLoginAt
     }));
 
     res.json({
-      overview: { totalBusinesses, activeBusinesses, newThisMonth, totalItems, totalTxns, txnsThisWeek },
+      overview: { totalBusinesses, activeBusinesses, newThisMonth, totalItems, totalTxns, txnsThisWeek, totalPurchaseValue, totalSaleValue },
       businesses,
       recentLogins
     });
@@ -829,7 +838,19 @@ router.get('/admin/business/:id', adminAuth, async (req, res) => {
       { $group: { _id: '$type', count: { $sum: 1 }, total: { $sum: '$totalAmount' } } }
     ]);
 
-    res.json({ business, stats: { items, categories, suppliers, txns }, txnBreakdown, activityLogs });
+    const loginAgg = await InventoryActivityLog.aggregate([
+      { $match: { business: bId, action: 'login' } },
+      { $group: { _id: null, count: { $sum: 1 }, last: { $max: '$createdAt' } } }
+    ]);
+    const loginCount = loginAgg[0]?.count || business.loginCount || 0;
+    const lastLogin  = loginAgg[0]?.last  || business.lastLoginAt || null;
+
+    res.json({
+      business,
+      stats: { items, categories, suppliers, txns, loginCount, lastLogin },
+      txnBreakdown,
+      activityLogs
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
