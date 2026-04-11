@@ -667,8 +667,34 @@ router.post('/transactions', inventoryAuth, async (req, res) => {
     }
 
     await item.save();
+
+    // ─── Update customer aggregate stats if this is a sale ────────────────────
+    if (type === 'sale' && (customerName || customerPhone)) {
+      // Try to find customer by phone or create reference
+      let cust = null;
+      if (customerPhone) {
+        cust = await InventoryCustomer.findOne({ business: req.business._id, phone: customerPhone.trim() });
+      }
+      // If not found by phone, look for by name (less reliable but fallback)
+      if (!cust && customerName) {
+        cust = await InventoryCustomer.findOne({ business: req.business._id, name: new RegExp(`^${customerName}$`, 'i') });
+      }
+      // If found, update aggregate stats
+      if (cust) {
+        await InventoryCustomer.updateOne(
+          { _id: cust._id },
+          {
+            $inc: { totalAmount: totalAmount },
+            $set: { lastPurchaseAt: new Date() }
+          }
+        );
+      }
+      // Note: If customer is not found, we don't auto-create here. The frontend can optionally
+      // create the customer record separately with the "Add New" checkbox.
+    }
+
     await txn.populate('item', 'name sku unit');
-    logActivity(req, req.business, 'transaction_create', { entity: 'transaction', entityId: txn._id, entityName: item.name, details: { type, qty, unitPrice: Number(unitPrice), totalAmount } });
+    logActivity(req, req.business, 'transaction_create', { entity: 'transaction', entityId: txn._id, entityName: item.name, details: { type, qty, unitPrice: Number(unitPrice), totalAmount, customerName } });
     res.status(201).json(txn);
   } catch (err) {
     console.error('Transaction error:', err);
