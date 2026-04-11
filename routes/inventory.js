@@ -11,6 +11,8 @@ const InventorySupplier         = require('../models/InventorySupplier');
 const InventoryItem             = require('../models/InventoryItem');
 const InventoryStockTransaction = require('../models/InventoryStockTransaction');
 const InventoryActivityLog      = require('../models/InventoryActivityLog');
+const InventoryCustomer         = require('../models/InventoryCustomer');
+const InventoryInvoice          = require('../models/InventoryInvoice');
 const adminAuth                 = require('../middleware/auth');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hadlay-kalan-secret-key';
@@ -867,6 +869,257 @@ router.patch('/admin/business/:id/toggle', adminAuth, async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
+});
+
+// ═══════════════════════════ CUSTOMERS ══════════════════════════════════════
+
+// GET /api/inventory/customers
+router.get('/customers', inventoryAuth, async (req, res) => {
+  try {
+    const { search, group, page = 1, limit = 50 } = req.query;
+    const query = { business: req.business._id, isActive: true };
+    if (search) query.$or = [
+      { name: new RegExp(search, 'i') },
+      { phone: new RegExp(search, 'i') },
+      { email: new RegExp(search, 'i') },
+    ];
+    if (group) query.group = group;
+    const [customers, total] = await Promise.all([
+      InventoryCustomer.find(query).sort({ name: 1 }).skip((+page - 1) * +limit).limit(+limit).lean(),
+      InventoryCustomer.countDocuments(query)
+    ]);
+    res.json({ customers, total, page: +page });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// POST /api/inventory/customers
+router.post('/customers', inventoryAuth, async (req, res) => {
+  try {
+    const { name, phone, email, address, gstin, group, notes } = req.body;
+    if (!name) return res.status(400).json({ message: 'Customer name is required.' });
+    const customer = await InventoryCustomer.create({
+      business: req.business._id,
+      name: name.trim(),
+      phone: phone?.trim() || undefined,
+      email: email?.trim()?.toLowerCase() || undefined,
+      address, gstin: gstin?.trim() || undefined,
+      group: group || 'retail',
+      notes: notes?.trim() || undefined,
+    });
+    res.status(201).json(customer);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/inventory/customers/:id
+router.get('/customers/:id', inventoryAuth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ message: 'Invalid ID.' });
+    const customer = await InventoryCustomer.findOne({ _id: req.params.id, business: req.business._id }).lean();
+    if (!customer) return res.status(404).json({ message: 'Customer not found.' });
+    const invoices = await InventoryInvoice.find({ business: req.business._id, customer: req.params.id })
+      .sort({ invoiceDate: -1 }).limit(50).lean();
+    res.json({ customer, invoices });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// PUT /api/inventory/customers/:id
+router.put('/customers/:id', inventoryAuth, async (req, res) => {
+  try {
+    const customer = await InventoryCustomer.findOneAndUpdate(
+      { _id: req.params.id, business: req.business._id },
+      { $set: req.body }, { new: true, runValidators: true }
+    );
+    if (!customer) return res.status(404).json({ message: 'Customer not found.' });
+    res.json(customer);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// DELETE /api/inventory/customers/:id
+router.delete('/customers/:id', inventoryAuth, async (req, res) => {
+  try {
+    await InventoryCustomer.findOneAndUpdate(
+      { _id: req.params.id, business: req.business._id },
+      { isActive: false }
+    );
+    res.json({ message: 'Customer deleted.' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ═══════════════════════════ INVOICES ═══════════════════════════════════════
+
+async function generateInvoiceNumber(businessId) {
+  const d   = new Date();
+  const ym  = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const count = await InventoryInvoice.countDocuments({ business: businessId });
+  return `INV-${ym}-${String(count + 1).padStart(4, '0')}`;
+}
+
+// GET /api/inventory/invoices/stats  (must be before /:id)
+router.get('/invoices/stats', inventoryAuth, async (req, res) => {
+  try {
+    const bId = req.business._id;
+    const now  = new Date();
+    const startOfMonth     = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const endOfLastMonth   = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+
+    const [totalInvoices, paidAgg, unpaidAgg, thisMonthAgg, lastMonthAgg, topCustomers, monthlyTrend] =
+      await Promise.all([
+        InventoryInvoice.countDocuments({ business: bId }),
+        InventoryInvoice.aggregate([
+          { $match: { business: bId, paymentStatus: 'paid' } },
+          { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$grandTotal' } } }
+        ]),
+        InventoryInvoice.aggregate([
+          { $match: { business: bId, paymentStatus: { $in: ['unpaid', 'partial'] } } },
+          { $group: { _id: null, count: { $sum: 1 }, totalDue: { $sum: '$amountDue' } } }
+        ]),
+        InventoryInvoice.aggregate([
+          { $match: { business: bId, invoiceDate: { $gte: startOfMonth } } },
+          { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$grandTotal' }, collected: { $sum: '$amountPaid' } } }
+        ]),
+        InventoryInvoice.aggregate([
+          { $match: { business: bId, invoiceDate: { $gte: startOfLastMonth, $lte: endOfLastMonth } } },
+          { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+        ]),
+        InventoryInvoice.aggregate([
+          { $match: { business: bId } },
+          { $group: { _id: '$customer', totalAmount: { $sum: '$grandTotal' }, invoiceCount: { $sum: 1 } } },
+          { $sort: { totalAmount: -1 } }, { $limit: 5 },
+          { $lookup: { from: 'inventorycustomers', localField: '_id', foreignField: '_id', as: 'cust' } },
+          { $project: { name: { $ifNull: [{ $arrayElemAt: ['$cust.name', 0] }, 'Walk-in'] }, totalAmount: 1, invoiceCount: 1 } }
+        ]),
+        InventoryInvoice.aggregate([
+          { $match: { business: bId, invoiceDate: { $gte: new Date(now.getFullYear(), now.getMonth() - 5, 1) } } },
+          { $group: { _id: { year: { $year: '$invoiceDate' }, month: { $month: '$invoiceDate' } }, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } },
+          { $sort: { '_id.year': 1, '_id.month': 1 } }
+        ])
+      ]);
+
+    res.json({
+      totalInvoices,
+      paidCount:       paidAgg[0]?.count    || 0,
+      paidAmount:      paidAgg[0]?.total    || 0,
+      unpaidCount:     unpaidAgg[0]?.count  || 0,
+      unpaidDue:       unpaidAgg[0]?.totalDue || 0,
+      thisMonth:       thisMonthAgg[0]      || { count: 0, total: 0, collected: 0 },
+      lastMonthTotal:  lastMonthAgg[0]?.total || 0,
+      topCustomers,
+      monthlyTrend
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/inventory/invoices
+router.get('/invoices', inventoryAuth, async (req, res) => {
+  try {
+    const { paymentStatus, customerId, from, to, month, page = 1, limit = 30 } = req.query;
+    const query = { business: req.business._id };
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+    if (customerId && mongoose.Types.ObjectId.isValid(customerId)) query.customer = customerId;
+    if (month) {
+      const [y, m] = month.split('-').map(Number);
+      query.invoiceDate = { $gte: new Date(y, m - 1, 1), $lt: new Date(y, m, 1) };
+    } else if (from || to) {
+      query.invoiceDate = {};
+      if (from) query.invoiceDate.$gte = new Date(from);
+      if (to)   query.invoiceDate.$lte = new Date(new Date(to).setHours(23, 59, 59, 999));
+    }
+    const [invoices, total] = await Promise.all([
+      InventoryInvoice.find(query).sort({ invoiceDate: -1 }).skip((+page - 1) * +limit).limit(+limit).lean(),
+      InventoryInvoice.countDocuments(query)
+    ]);
+    res.json({ invoices, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/inventory/invoices/:id
+router.get('/invoices/:id', inventoryAuth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ message: 'Invalid ID.' });
+    const invoice = await InventoryInvoice.findOne({ _id: req.params.id, business: req.business._id })
+      .populate('customer', 'name phone email gstin address').lean();
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found.' });
+    res.json(invoice);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// POST /api/inventory/invoices
+router.post('/invoices', inventoryAuth, async (req, res) => {
+  try {
+    const bId = req.business._id;
+    const invoiceNumber = await generateInvoiceNumber(bId);
+    const {
+      customer: customerId, customerName, customerPhone, customerEmail,
+      customerAddress, customerGstin,
+      items = [], subtotal = 0, discountAmount = 0, taxAmount = 0, grandTotal = 0,
+      amountPaid = 0, paymentMethod, invoiceDate, dueDate, notes, terms, status = 'sent'
+    } = req.body;
+
+    const amountDue = Math.max(0, grandTotal - amountPaid);
+    const paymentStatus = amountPaid <= 0 ? 'unpaid' : amountDue <= 0 ? 'paid' : 'partial';
+
+    const invoice = await InventoryInvoice.create({
+      business: bId, invoiceNumber,
+      customer: customerId && mongoose.Types.ObjectId.isValid(customerId) ? customerId : undefined,
+      customerName, customerPhone, customerEmail, customerAddress, customerGstin,
+      items, subtotal, discountAmount, taxAmount, grandTotal,
+      amountPaid, amountDue, paymentStatus,
+      paymentMethod: paymentMethod || 'cash',
+      invoiceDate: invoiceDate ? new Date(invoiceDate) : new Date(),
+      dueDate: dueDate ? new Date(dueDate) : undefined,
+      notes, terms, status
+    });
+
+    // Update customer aggregate stats
+    if (customerId && mongoose.Types.ObjectId.isValid(customerId)) {
+      await InventoryCustomer.findByIdAndUpdate(customerId, {
+        $inc: { totalInvoices: 1, totalAmount: grandTotal, totalPaid: +amountPaid, outstandingDue: amountDue },
+        $set: { lastPurchaseAt: new Date() }
+      });
+    }
+
+    logActivity(req, req.business, 'transaction_create', {
+      entity: 'invoice', entityId: invoice._id, entityName: invoice.invoiceNumber,
+      details: { grandTotal, customerName }
+    });
+    res.status(201).json(invoice);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// PUT /api/inventory/invoices/:id
+router.put('/invoices/:id', inventoryAuth, async (req, res) => {
+  try {
+    if (req.body.grandTotal !== undefined || req.body.amountPaid !== undefined) {
+      const existing = await InventoryInvoice.findOne({ _id: req.params.id, business: req.business._id }).lean();
+      const gt  = req.body.grandTotal  ?? existing?.grandTotal  ?? 0;
+      const ap  = req.body.amountPaid  ?? existing?.amountPaid  ?? 0;
+      const due = Math.max(0, gt - ap);
+      req.body.amountDue      = due;
+      req.body.paymentStatus  = ap <= 0 ? 'unpaid' : due <= 0 ? 'paid' : 'partial';
+    }
+    const invoice = await InventoryInvoice.findOneAndUpdate(
+      { _id: req.params.id, business: req.business._id },
+      { $set: req.body }, { new: true }
+    );
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found.' });
+    res.json(invoice);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// DELETE /api/inventory/invoices/:id
+router.delete('/invoices/:id', inventoryAuth, async (req, res) => {
+  try {
+    const inv = await InventoryInvoice.findOneAndDelete({ _id: req.params.id, business: req.business._id });
+    if (!inv) return res.status(404).json({ message: 'Invoice not found.' });
+    // Reverse customer stats
+    if (inv.customer) {
+      await InventoryCustomer.findByIdAndUpdate(inv.customer, {
+        $inc: { totalInvoices: -1, totalAmount: -inv.grandTotal, totalPaid: -inv.amountPaid, outstandingDue: -inv.amountDue }
+      });
+    }
+    res.json({ message: 'Invoice deleted.' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 module.exports = router;
