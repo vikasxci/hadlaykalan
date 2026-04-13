@@ -17,8 +17,31 @@ const RestaurantReservation = require('../models/RestaurantReservation');
 const RestaurantCustomer    = require('../models/RestaurantCustomer');
 const InventoryItem         = require('../models/InventoryItem');
 const InventoryStockTransaction = require('../models/InventoryStockTransaction');
+const BusinessActivityLog   = require('../models/BusinessActivityLog');
+const adminAuth             = require('../middleware/auth');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hadlay-kalan-secret-key';
+
+// ── Activity Logger ───────────────────────────────────────────────────────────
+async function logActivity(req, restaurant, action, extras = {}) {
+  try {
+    await BusinessActivityLog.create({
+      bizType:      'restaurant',
+      business:     restaurant._id,
+      businessName: restaurant.businessName,
+      ownerEmail:   restaurant.email,
+      actor:        req.staff?.name  || extras.actor || null,
+      actorRole:    req.staff?.role  || extras.actorRole || null,
+      action,
+      entity:     extras.entity     || null,
+      entityId:   extras.entityId   || null,
+      entityName: extras.entityName || null,
+      details:    extras.details    || null,
+      ip:         req.headers['x-forwarded-for']?.split(',')[0] || req.socket?.remoteAddress || '',
+      userAgent:  req.headers['user-agent'] || '',
+    });
+  } catch (_) { /* non-critical */ }
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function makeToken(staffId, restaurantId, role) {
@@ -62,6 +85,7 @@ router.post('/auth/register', async (req, res) => {
     const token = makeToken(owner._id, restaurant._id, 'owner');
     owner.token=token; await owner.save({validateBeforeSave:false});
     restaurant.token=token; await restaurant.save({validateBeforeSave:false});
+    logActivity(req, restaurant, 'register', { actor: ownerName, actorRole: 'owner', details: { businessType: restaurant.businessType, city } });
     res.status(201).json({ message:'Restaurant registered.', token, staff:owner.toSafeObject(), restaurant:restaurant.toSafeObject() });
   } catch(err) {
     if(err.code===11000) return res.status(409).json({ message:'Email or phone already registered.' });
@@ -86,6 +110,7 @@ router.post('/auth/login', async (req, res) => {
     const token = makeToken(staff._id, restaurant._id, staff.role);
     staff.token=token; staff.lastLoginAt=new Date(); staff.loginCount=(staff.loginCount||0)+1;
     await staff.save({validateBeforeSave:false});
+    logActivity(req, restaurant, 'login', { actor: staff.name, actorRole: staff.role });
     res.json({ token, staff:staff.toSafeObject(), restaurant:restaurant.toSafeObject() });
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -104,6 +129,7 @@ router.post('/auth/pin-login', async (req, res) => {
     const token = makeToken(matched._id, restaurant._id, matched.role);
     matched.token=token; matched.lastLoginAt=new Date();
     await matched.save({validateBeforeSave:false});
+    logActivity(req, restaurant, 'pin_login', { actor: matched.name, actorRole: matched.role });
     res.json({ token, staff:matched.toSafeObject(), restaurant:restaurant.toSafeObject() });
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -134,6 +160,7 @@ router.post('/staff', restaurantAuth, requireRole('owner','manager'), async (req
     if (!name||!role) return res.status(400).json({ message:'name and role are required.' });
     if (req.staff.role==='manager'&&role==='owner') return res.status(403).json({ message:'Managers cannot create owner accounts.' });
     const m = await RestaurantStaff.create({ restaurant:req.restaurant._id, name, email, phone, password, pin, role, designation, salary, joiningDate });
+    logActivity(req, req.restaurant, 'staff_create', { entity: 'staff', entityId: m._id, entityName: name, details: { role } });
     res.status(201).json(m.toSafeObject());
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -149,6 +176,7 @@ router.put('/staff/:id', restaurantAuth, requireRole('owner','manager'), async (
     if (req.body.pin) m.pin=req.body.pin;
     if (req.body.permissions) Object.assign(m.permissions, req.body.permissions);
     await m.save();
+    logActivity(req, req.restaurant, 'staff_update', { entity: 'staff', entityId: m._id, entityName: m.name });
     res.json(m.toSafeObject());
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -158,6 +186,7 @@ router.delete('/staff/:id', restaurantAuth, requireRole('owner'), async (req, re
     const m = await RestaurantStaff.findOne({ _id:req.params.id, restaurant:req.restaurant._id });
     if (!m) return res.status(404).json({ message:'Staff not found.' });
     if (m.role==='owner') return res.status(400).json({ message:'Cannot delete owner.' });
+    logActivity(req, req.restaurant, 'staff_delete', { entity: 'staff', entityId: m._id, entityName: m.name });
     await m.deleteOne();
     res.json({ message:'Staff removed.' });
   } catch(err) { res.status(500).json({ message:err.message }); }
@@ -175,6 +204,7 @@ router.put('/settings', restaurantAuth, requireRole('owner','manager'), async (r
     const update={};
     allowed.forEach(k=>{ if(req.body[k]!==undefined) update[k]=req.body[k]; });
     const biz = await RestaurantBusiness.findByIdAndUpdate(req.restaurant._id,{$set:update},{new:true,runValidators:true}).select('-password -token');
+    logActivity(req, biz, 'settings_update', { entity: 'business', entityId: biz._id });
     res.json(biz);
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -271,6 +301,7 @@ router.post('/menu', restaurantAuth, requirePerm('editMenu'), async (req, res) =
       variants:variants||[], taxRate, taxIncluded, preparationTime,
       allergens:allergens||[], tags:tags||[], sortOrder:sortOrder||0, kitchenStation, modifierGroups:modifierGroups||[]
     });
+    logActivity(req, req.restaurant, 'menu_item_create', { entity: 'menu', entityId: item._id, entityName: name, details: { category, price } });
     res.status(201).json(item);
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -285,6 +316,7 @@ router.put('/menu/:id', restaurantAuth, requirePerm('editMenu'), async (req, res
       { _id:req.params.id, restaurant:req.restaurant._id }, update, {new:true,runValidators:true}
     );
     if (!item) return res.status(404).json({ message:'Menu item not found.' });
+    logActivity(req, req.restaurant, 'menu_item_update', { entity: 'menu', entityId: item._id, entityName: item.name });
     res.json(item);
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -303,6 +335,7 @@ router.delete('/menu/:id', restaurantAuth, requirePerm('editMenu'), async (req, 
     const item = await RestaurantMenuItem.findOneAndDelete({ _id:req.params.id, restaurant:req.restaurant._id });
     if (!item) return res.status(404).json({ message:'Menu item not found.' });
     await RestaurantRecipe.deleteOne({ menuItem:req.params.id, restaurant:req.restaurant._id });
+    logActivity(req, req.restaurant, 'menu_item_delete', { entity: 'menu', entityId: req.params.id, entityName: item.name });
     res.json({ message:'Menu item deleted.' });
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -537,6 +570,10 @@ async function _createOrder(req, res) {
     order.kots.push(kot._id);
     if(tableId) await RestaurantTable.findByIdAndUpdate(tableId,{currentOrder:order._id});
     await order.save();
+    logActivity(req, req.restaurant, 'order_create', {
+      entity: 'order', entityId: order._id, entityName: order.orderNumber,
+      details: { type: order.type, tableNo: order.tableNo, items: items.length }
+    });
     res.status(201).json({ order, kot });
   } catch(err) { res.status(500).json({ message:err.message }); }
 }
@@ -825,6 +862,7 @@ router.post('/reservations', restaurantAuth, async (req, res) => {
     const { guestName, guestPhone, guestEmail, partySize, date, time, duration, tableId, area, occasion, notes, specialRequests } = req.body;
     if (!guestName||!guestPhone||!partySize||!date||!time) return res.status(400).json({ message:'guestName, guestPhone, partySize, date and time required.' });
     const r=await RestaurantReservation.create({ restaurant:req.restaurant._id, guestName, guestPhone, guestEmail, partySize, date:new Date(date), time, duration, table:tableId||undefined, area, occasion, notes, specialRequests, status:'pending' });
+    logActivity(req, req.restaurant, 'reservation_create', { entity: 'reservation', entityId: r._id, entityName: guestName, details: { date, partySize } });
     res.status(201).json(r);
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
@@ -898,6 +936,86 @@ router.get('/reports', restaurantAuth, requirePerm('viewReports'), async (req, r
       staffPerformance: staffPerf.map(s=>({name:s.waiterName||String(s._id), orders:s.orders, revenue:s.revenue}))
     });
   } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN MONITORING (Main Admin Panel — protected by Hadlay Kalan admin JWT)
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/admin/monitor', adminAuth, async (req, res) => {
+  try {
+    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [totalBusinesses, activeBusinesses, newThisMonth, totalOrders, totalCustomers, businessList] = await Promise.all([
+      RestaurantBusiness.countDocuments(),
+      RestaurantBusiness.countDocuments({ isActive: true }),
+      RestaurantBusiness.countDocuments({ createdAt: { $gte: since30 } }),
+      RestaurantOrder.countDocuments(),
+      RestaurantCustomer.countDocuments(),
+      RestaurantBusiness.find().select('-password -token -settings').sort({ createdAt: -1 }).lean()
+    ]);
+
+    const bizIds = businessList.map(b => b._id);
+    const [orderCounts, custCounts, staffCounts, loginCounts] = await Promise.all([
+      RestaurantOrder.aggregate([
+        { $match: { restaurant: { $in: bizIds }, status: 'billed' } },
+        { $group: { _id: '$restaurant', count: { $sum: 1 }, revenue: { $sum: '$grandTotal' } } }
+      ]),
+      RestaurantCustomer.aggregate([
+        { $match: { restaurant: { $in: bizIds } } },
+        { $group: { _id: '$restaurant', count: { $sum: 1 } } }
+      ]),
+      RestaurantStaff.aggregate([
+        { $match: { restaurant: { $in: bizIds }, isActive: true } },
+        { $group: { _id: '$restaurant', count: { $sum: 1 } } }
+      ]),
+      BusinessActivityLog.aggregate([
+        { $match: { business: { $in: bizIds }, bizType: 'restaurant', action: { $in: ['login', 'pin_login'] } } },
+        { $group: { _id: '$business', count: { $sum: 1 }, last: { $max: '$createdAt' } } }
+      ])
+    ]);
+
+    const orderMap = Object.fromEntries(orderCounts.map(x => [x._id.toString(), x]));
+    const custMap  = Object.fromEntries(custCounts.map(x  => [x._id.toString(), x.count]));
+    const staffMap = Object.fromEntries(staffCounts.map(x => [x._id.toString(), x.count]));
+    const loginMap = Object.fromEntries(loginCounts.map(x => [x._id.toString(), x]));
+
+    const businesses = businessList.map(b => ({
+      ...b,
+      _orderCount:  orderMap[b._id.toString()]?.count   || 0,
+      _revenue:     orderMap[b._id.toString()]?.revenue || 0,
+      _custCount:   custMap[b._id.toString()]           || 0,
+      _staffCount:  staffMap[b._id.toString()]          || 0,
+      _loginCount:  loginMap[b._id.toString()]?.count   || 0,
+      _lastLogin:   loginMap[b._id.toString()]?.last    || null,
+    }));
+
+    res.json({ overview: { totalBusinesses, activeBusinesses, newThisMonth, totalOrders, totalCustomers }, businesses });
+  } catch(err) { res.status(500).json({ message: err.message }); }
+});
+
+router.get('/admin/activity', adminAuth, async (req, res) => {
+  try {
+    const mongoose = require('mongoose');
+    const { businessId, action, page = 1, limit = 50 } = req.query;
+    const query = { bizType: 'restaurant' };
+    if (businessId && mongoose.Types.ObjectId.isValid(businessId)) query.business = businessId;
+    if (action) query.action = action;
+    const [logs, total] = await Promise.all([
+      BusinessActivityLog.find(query).sort({ createdAt: -1 }).skip((+page - 1) * +limit).limit(+limit).lean(),
+      BusinessActivityLog.countDocuments(query)
+    ]);
+    res.json({ logs, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch(err) { res.status(500).json({ message: err.message }); }
+});
+
+router.patch('/admin/business/:id/toggle', adminAuth, async (req, res) => {
+  try {
+    const biz = await RestaurantBusiness.findById(req.params.id);
+    if (!biz) return res.status(404).json({ message: 'Business not found.' });
+    biz.isActive = !biz.isActive;
+    await biz.save();
+    res.json({ message: `Account ${biz.isActive ? 'activated' : 'deactivated'}.`, isActive: biz.isActive });
+  } catch(err) { res.status(500).json({ message: err.message }); }
 });
 
 module.exports = router;
