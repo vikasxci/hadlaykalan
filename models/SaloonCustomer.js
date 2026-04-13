@@ -42,11 +42,3 @@ saloonCustomerSchema.index({ saloon: 1, name: 'text' });
 
 module.exports = mongoose.models.SaloonCustomer ||
   mongoose.model('SaloonCustomer', saloonCustomerSchema);
-
-}, { timestamps: true });
-
-saloonCustomerSchema.index({ saloon: 1, phone: 1 }, { unique: true });
-saloonCustomerSchema.index({ saloon: 1, name: 'text' });
-
-module.exports = mongoose.models.SaloonCustomer ||
-  mongoose.model('SaloonCustomer', saloonCustomerSchema);
