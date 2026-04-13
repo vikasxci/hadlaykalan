@@ -8,14 +8,37 @@ const cloudinary = require('cloudinary').v2;
 const saloonAuth = require('../middleware/saloonAuth');
 const { requireRole } = saloonAuth;
 
-const SaloonBusiness  = require('../models/SaloonBusiness');
-const SaloonStaff     = require('../models/SaloonStaff');
-const SaloonService   = require('../models/SaloonService');
-const SaloonWorkEntry = require('../models/SaloonWorkEntry');
-const SaloonCustomer  = require('../models/SaloonCustomer');
+const SaloonBusiness   = require('../models/SaloonBusiness');
+const SaloonStaff      = require('../models/SaloonStaff');
+const SaloonService    = require('../models/SaloonService');
+const SaloonWorkEntry  = require('../models/SaloonWorkEntry');
+const SaloonCustomer   = require('../models/SaloonCustomer');
 const SaloonAttendance = require('../models/SaloonAttendance');
+const BusinessActivityLog = require('../models/BusinessActivityLog');
+const adminAuth        = require('../middleware/auth');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'hadlay-kalan-secret-key';
+
+// ── Activity Logger ───────────────────────────────────────────────────────────
+async function logActivity(req, saloon, action, extras = {}) {
+  try {
+    await BusinessActivityLog.create({
+      bizType:      'saloon',
+      business:     saloon._id,
+      businessName: saloon.businessName,
+      ownerEmail:   saloon.email,
+      actor:        req.staff?.name  || extras.actor || null,
+      actorRole:    req.staff?.role  || extras.actorRole || null,
+      action,
+      entity:     extras.entity     || null,
+      entityId:   extras.entityId   || null,
+      entityName: extras.entityName || null,
+      details:    extras.details    || null,
+      ip:         req.headers['x-forwarded-for']?.split(',')[0] || req.socket?.remoteAddress || '',
+      userAgent:  req.headers['user-agent'] || '',
+    });
+  } catch (_) { /* non-critical */ }
+}
 
 // ── Cloudinary upload for customer photos ─────────────────────────────────────
 const photoStorage = new CloudinaryStorage({
@@ -84,6 +107,7 @@ router.post('/auth/register', async (req, res) => {
     saloon.token = token;
     await saloon.save({ validateBeforeSave: false });
 
+    logActivity(req, saloon, 'register', { actor: ownerName, actorRole: 'owner', details: { businessType: saloon.businessType, city } });
     res.status(201).json({
       message: 'Saloon registered.',
       token,
@@ -120,6 +144,7 @@ router.post('/auth/login', async (req, res) => {
     staff.loginCount = (staff.loginCount || 0) + 1;
     await staff.save({ validateBeforeSave: false });
 
+    logActivity(req, saloon, 'login', { actor: staff.name, actorRole: staff.role });
     res.json({ token, staff: staff.toSafeObject(), saloon: saloon.toSafeObject() });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -146,6 +171,7 @@ router.post('/auth/pin-login', async (req, res) => {
     matched.loginCount = (matched.loginCount || 0) + 1;
     await matched.save({ validateBeforeSave: false });
 
+    logActivity(req, saloon, 'pin_login', { actor: matched.name, actorRole: matched.role });
     res.json({ token, staff: matched.toSafeObject(), saloon: saloon.toSafeObject() });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -192,6 +218,7 @@ router.post('/staff', saloonAuth, requireRole('owner', 'manager'), async (req, r
       commissionValue: commissionValue ?? 40,
       designation, joiningDate
     });
+    logActivity(req, req.saloon, 'staff_create', { entity: 'staff', entityId: staff._id, entityName: staff.name, details: { role } });
     res.status(201).json(staff.toSafeObject());
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: 'Phone or email already used.' });
@@ -212,6 +239,7 @@ router.put('/staff/:id', saloonAuth, requireRole('owner', 'manager'), async (req
     if (req.body.pin)      staff.pin      = req.body.pin;
 
     await staff.save();
+    logActivity(req, req.saloon, 'staff_update', { entity: 'staff', entityId: staff._id, entityName: staff.name });
     res.json(staff.toSafeObject());
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -222,6 +250,7 @@ router.delete('/staff/:id', saloonAuth, requireRole('owner'), async (req, res) =
     const staff = await SaloonStaff.findOne({ _id: req.params.id, saloon: req.saloon._id });
     if (!staff) return res.status(404).json({ message: 'Staff not found.' });
     if (staff.role === 'owner') return res.status(400).json({ message: 'Cannot delete owner.' });
+    logActivity(req, req.saloon, 'staff_delete', { entity: 'staff', entityId: staff._id, entityName: staff.name });
     await SaloonStaff.findByIdAndDelete(staff._id);
     res.json({ message: 'Staff deleted.' });
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -260,6 +289,7 @@ router.post('/services', saloonAuth, requireRole('owner', 'manager'), async (req
     const { name, category, price, duration, gender, description } = req.body;
     if (!name || price === undefined) return res.status(400).json({ message: 'name and price are required.' });
     const service = await SaloonService.create({ saloon: req.saloon._id, name, category, price, duration, gender, description });
+    logActivity(req, req.saloon, 'service_create', { entity: 'service', entityId: service._id, entityName: name, details: { category, price } });
     res.status(201).json(service);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -273,6 +303,7 @@ router.put('/services/:id', saloonAuth, requireRole('owner', 'manager'), async (
       { new: true, runValidators: true }
     );
     if (!service) return res.status(404).json({ message: 'Service not found.' });
+    logActivity(req, req.saloon, 'service_update', { entity: 'service', entityId: service._id, entityName: service.name });
     res.json(service);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -280,10 +311,12 @@ router.put('/services/:id', saloonAuth, requireRole('owner', 'manager'), async (
 // DELETE /api/saloon/services/:id
 router.delete('/services/:id', saloonAuth, requireRole('owner', 'manager'), async (req, res) => {
   try {
+    const svc = await SaloonService.findOne({ _id: req.params.id, saloon: req.saloon._id });
     await SaloonService.findOneAndUpdate(
       { _id: req.params.id, saloon: req.saloon._id },
       { isActive: false }
     );
+    logActivity(req, req.saloon, 'service_delete', { entity: 'service', entityId: req.params.id, entityName: svc?.name });
     res.json({ message: 'Service removed.' });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -366,6 +399,10 @@ router.post('/entries', saloonAuth, uploadPhoto.single('customerPhoto'), async (
       });
     }
 
+    logActivity(req, req.saloon, 'bill_create', {
+      entity: 'bill', entityId: entry._id, entityName: entry.billNumber,
+      details: { grandTotal: entry.grandTotal, customerName: entry.customerName, paymentMode: entry.paymentMode }
+    });
     res.status(201).json(entry);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -458,6 +495,7 @@ router.post('/customers', saloonAuth, async (req, res) => {
       name: name.trim(), phone: phone.trim(), email, gender, birthdate, notes, preferredStaff,
       firstVisitAt: new Date()
     });
+    logActivity(req, req.saloon, 'customer_create', { entity: 'customer', entityId: customer._id, entityName: customer.name });
     res.status(201).json(customer);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -502,6 +540,7 @@ router.post('/attendance', saloonAuth, requireRole('owner', 'manager'), async (r
       { status: status || 'present', checkIn, checkOut, note },
       { upsert: true, new: true, runValidators: true }
     );
+    logActivity(req, req.saloon, 'attendance_mark', { entity: 'attendance', entityId: staffId, details: { date, status: status || 'present' } });
     res.json(record);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -599,6 +638,7 @@ router.put('/settings', saloonAuth, requireRole('owner'), async (req, res) => {
     const update = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) update[k] = req.body[k]; });
     const saloon = await SaloonBusiness.findByIdAndUpdate(req.saloon._id, update, { new: true }).select('-password -token');
+    logActivity(req, saloon, 'settings_update', { entity: 'business', entityId: saloon._id });
     res.json(saloon.toSafeObject ? saloon.toSafeObject() : saloon);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -609,6 +649,103 @@ router.post('/settings/logo', saloonAuth, requireRole('owner'), uploadPhoto.sing
     if (!req.file) return res.status(400).json({ message: 'No file uploaded.' });
     const saloon = await SaloonBusiness.findByIdAndUpdate(req.saloon._id, { logo: req.file.path }, { new: true });
     res.json({ logo: saloon.logo });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN MONITORING (Main Admin Panel — protected by Hadlay Kalan admin JWT)
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/saloon/admin/monitor  — overview of all saloon businesses
+router.get('/admin/monitor', adminAuth, async (req, res) => {
+  try {
+    const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [
+      totalBusinesses,
+      activeBusinesses,
+      newThisMonth,
+      totalBills,
+      totalCustomers,
+      businessList
+    ] = await Promise.all([
+      SaloonBusiness.countDocuments(),
+      SaloonBusiness.countDocuments({ isActive: true }),
+      SaloonBusiness.countDocuments({ createdAt: { $gte: since30 } }),
+      SaloonWorkEntry.countDocuments(),
+      SaloonCustomer.countDocuments({ isActive: true }),
+      SaloonBusiness.find().select('-password -token -settings').sort({ createdAt: -1 }).lean()
+    ]);
+
+    const bizIds = businessList.map(b => b._id);
+    const [billCounts, custCounts, staffCounts, loginCounts, revAgg] = await Promise.all([
+      SaloonWorkEntry.aggregate([
+        { $match: { saloon: { $in: bizIds } } },
+        { $group: { _id: '$saloon', count: { $sum: 1 }, revenue: { $sum: '$grandTotal' } } }
+      ]),
+      SaloonCustomer.aggregate([
+        { $match: { saloon: { $in: bizIds }, isActive: true } },
+        { $group: { _id: '$saloon', count: { $sum: 1 } } }
+      ]),
+      SaloonStaff.aggregate([
+        { $match: { saloon: { $in: bizIds }, isActive: true } },
+        { $group: { _id: '$saloon', count: { $sum: 1 } } }
+      ]),
+      BusinessActivityLog.aggregate([
+        { $match: { business: { $in: bizIds }, bizType: 'saloon', action: { $in: ['login', 'pin_login'] } } },
+        { $group: { _id: '$business', count: { $sum: 1 }, last: { $max: '$createdAt' } } }
+      ]),
+      SaloonWorkEntry.aggregate([
+        { $match: { saloon: { $in: bizIds }, serviceDate: { $gte: since30 } } },
+        { $group: { _id: '$saloon', revenue: { $sum: '$grandTotal' } } }
+      ])
+    ]);
+
+    const billMap   = Object.fromEntries(billCounts.map(x  => [x._id.toString(), x]));
+    const custMap   = Object.fromEntries(custCounts.map(x  => [x._id.toString(), x.count]));
+    const staffMap  = Object.fromEntries(staffCounts.map(x => [x._id.toString(), x.count]));
+    const loginMap  = Object.fromEntries(loginCounts.map(x => [x._id.toString(), x]));
+    const revMap    = Object.fromEntries(revAgg.map(x      => [x._id.toString(), x.revenue]));
+
+    const businesses = businessList.map(b => ({
+      ...b,
+      _billCount:   billMap[b._id.toString()]?.count   || 0,
+      _revenue:     billMap[b._id.toString()]?.revenue || 0,
+      _custCount:   custMap[b._id.toString()]          || 0,
+      _staffCount:  staffMap[b._id.toString()]         || 0,
+      _loginCount:  loginMap[b._id.toString()]?.count  || 0,
+      _lastLogin:   loginMap[b._id.toString()]?.last   || null,
+      _rev30d:      revMap[b._id.toString()]           || 0
+    }));
+
+    res.json({ overview: { totalBusinesses, activeBusinesses, newThisMonth, totalBills, totalCustomers }, businesses });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/saloon/admin/activity?businessId=&action=&page=1&limit=50
+router.get('/admin/activity', adminAuth, async (req, res) => {
+  try {
+    const mongoose = require('mongoose');
+    const { businessId, action, page = 1, limit = 50 } = req.query;
+    const query = { bizType: 'saloon' };
+    if (businessId && mongoose.Types.ObjectId.isValid(businessId)) query.business = businessId;
+    if (action) query.action = action;
+
+    const [logs, total] = await Promise.all([
+      BusinessActivityLog.find(query).sort({ createdAt: -1 }).skip((+page - 1) * +limit).limit(+limit).lean(),
+      BusinessActivityLog.countDocuments(query)
+    ]);
+    res.json({ logs, total, page: +page, pages: Math.ceil(total / +limit) });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// PATCH /api/saloon/admin/business/:id/toggle
+router.patch('/admin/business/:id/toggle', adminAuth, async (req, res) => {
+  try {
+    const biz = await SaloonBusiness.findById(req.params.id);
+    if (!biz) return res.status(404).json({ message: 'Business not found.' });
+    biz.isActive = !biz.isActive;
+    await biz.save();
+    res.json({ message: `Account ${biz.isActive ? 'activated' : 'deactivated'}.`, isActive: biz.isActive });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
