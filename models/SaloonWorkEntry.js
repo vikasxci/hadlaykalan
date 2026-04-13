@@ -23,14 +23,7 @@ const saloonWorkEntrySchema = new Schema({
   customer:      { type: Schema.Types.ObjectId, ref: 'SaloonCustomer' },
   customerName:  { type: String, trim: true, default: 'Walk-in' },
   customerPhone: { type: String, trim: true },
-  customerPhoto: { type: String },  // Cloudinary URL — primary / "before" shot (legacy compat)
-
-  // Customer photos (before, after, progress shots)
-  photos: [{
-    url:     { type: String, required: true },
-    label:   { type: String, enum: ['before', 'after', 'other'], default: 'before' },
-    caption: { type: String, trim: true }
-  }],
+  customerPhoto: { type: String },  // Cloudinary URL — customer photo for this bill
 
   // Services rendered
   services: [serviceLineSchema],
