@@ -35,3 +35,4 @@ inventoryActivityLogSchema.index({ action: 1, createdAt: -1 });
 inventoryActivityLogSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('InventoryActivityLog', inventoryActivityLogSchema);
+module.exports = mongoose.model('InventoryActivityLog', inventoryActivityLogSchema);
