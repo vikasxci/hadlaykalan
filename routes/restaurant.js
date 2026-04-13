@@ -1018,4 +1018,27 @@ router.patch('/admin/business/:id/toggle', adminAuth, async (req, res) => {
   } catch(err) { res.status(500).json({ message: err.message }); }
 });
 
+// GET /api/restaurant/admin/business/:id/credentials
+router.get('/admin/business/:id/credentials', adminAuth, async (req, res) => {
+  try {
+    const biz = await RestaurantBusiness.findById(req.params.id).select('businessName ownerName email phone').lean();
+    if (!biz) return res.status(404).json({ message: 'Business not found.' });
+    res.json({ businessName: biz.businessName, ownerName: biz.ownerName, email: biz.email, phone: biz.phone });
+  } catch(err) { res.status(500).json({ message: err.message }); }
+});
+
+// PATCH /api/restaurant/admin/business/:id/set-password
+router.patch('/admin/business/:id/set-password', adminAuth, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6)
+      return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    const biz = await RestaurantBusiness.findById(req.params.id);
+    if (!biz) return res.status(404).json({ message: 'Business not found.' });
+    biz.password = newPassword;
+    await biz.save();
+    res.json({ message: 'Password updated successfully.' });
+  } catch(err) { res.status(500).json({ message: err.message }); }
+});
+
 module.exports = router;
