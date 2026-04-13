@@ -105,4 +105,4 @@ inventoryStockTransactionSchema.index({ business: 1, item: 1, createdAt: -1 });
 inventoryStockTransactionSchema.index({ business: 1, type: 1, createdAt: -1 });
 inventoryStockTransactionSchema.index({ business: 1, createdAt: -1 });
 
-module.exports = mongoose.model('InventoryStockTransaction', inventoryStockTransactionSchema);
+module.exports = mongoose.models.InventoryStockTransaction || mongoose.model('InventoryStockTransaction', inventoryStockTransactionSchema);
