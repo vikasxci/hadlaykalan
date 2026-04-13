@@ -1,6 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const jwt     = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const multer  = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const cloudinary = require('cloudinary').v2;
@@ -14,6 +15,7 @@ const SaloonService    = require('../models/SaloonService');
 const SaloonWorkEntry  = require('../models/SaloonWorkEntry');
 const SaloonCustomer   = require('../models/SaloonCustomer');
 const SaloonAttendance = require('../models/SaloonAttendance');
+const SaloonSalarySettlement = require('../models/SaloonSalarySettlement');
 const BusinessActivityLog = require('../models/BusinessActivityLog');
 const adminAuth        = require('../middleware/auth');
 
@@ -724,7 +726,6 @@ router.get('/admin/monitor', adminAuth, async (req, res) => {
 // GET /api/saloon/admin/activity?businessId=&action=&page=1&limit=50
 router.get('/admin/activity', adminAuth, async (req, res) => {
   try {
-    const mongoose = require('mongoose');
     const { businessId, action, page = 1, limit = 50 } = req.query;
     const query = { bizType: 'saloon' };
     if (businessId && mongoose.Types.ObjectId.isValid(businessId)) query.business = businessId;
@@ -746,6 +747,144 @@ router.patch('/admin/business/:id/toggle', adminAuth, async (req, res) => {
     biz.isActive = !biz.isActive;
     await biz.save();
     res.json({ message: `Account ${biz.isActive ? 'activated' : 'deactivated'}.`, isActive: biz.isActive });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// GET /api/saloon/admin/business/:id/credentials
+router.get('/admin/business/:id/credentials', adminAuth, async (req, res) => {
+  try {
+    const biz = await SaloonBusiness.findById(req.params.id).select('businessName ownerName email phone').lean();
+    if (!biz) return res.status(404).json({ message: 'Business not found.' });
+    res.json({ businessName: biz.businessName, ownerName: biz.ownerName, email: biz.email, phone: biz.phone });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// PATCH /api/saloon/admin/business/:id/set-password
+router.patch('/admin/business/:id/set-password', adminAuth, async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6)
+      return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    const biz = await SaloonBusiness.findById(req.params.id);
+    if (!biz) return res.status(404).json({ message: 'Business not found.' });
+    biz.password = newPassword; // pre-save hook will hash it
+    await biz.save();
+    res.json({ message: 'Password updated successfully.' });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// SALARY SETTLEMENT
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/saloon/salary/settlements?staffId=  — pending earning + settlement history
+router.get('/salary/settlements', saloonAuth, requireRole('owner', 'manager'), async (req, res) => {
+  try {
+    const { staffId } = req.query;
+    if (!staffId) return res.status(400).json({ message: 'staffId required.' });
+    const saloonId = req.saloon._id;
+
+    // All past settlements (most recent first)
+    const settlements = await SaloonSalarySettlement
+      .find({ saloon: saloonId, staff: staffId })
+      .sort({ settledAt: -1 })
+      .limit(30)
+      .lean();
+
+    // Period start = last settlement date (or joining date)
+    const lastSettlement = settlements[0];
+    let periodFrom;
+    if (lastSettlement) {
+      periodFrom = new Date(lastSettlement.settledAt);
+    } else {
+      const staffDoc = await SaloonStaff.findById(staffId).select('joiningDate').lean();
+      periodFrom = staffDoc?.joiningDate || new Date(0);
+    }
+
+    const periodTo = new Date();
+    periodTo.setHours(23, 59, 59, 999);
+
+    const matchPending = {
+      saloon: saloonId,
+      staff:  new mongoose.Types.ObjectId(staffId),
+      serviceDate: { $gte: periodFrom, $lte: periodTo }
+    };
+
+    const [pending] = await SaloonWorkEntry.aggregate([
+      { $match: matchPending },
+      { $group: { _id: null, bills: { $sum: 1 }, revenue: { $sum: '$grandTotal' }, earning: { $sum: '$staffEarning' } } }
+    ]);
+
+    res.json({
+      settlements,
+      pending: pending || { bills: 0, revenue: 0, earning: 0 },
+      periodFrom,
+      periodTo
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// POST /api/saloon/salary/settle  — create a settlement record
+router.post('/salary/settle', saloonAuth, requireRole('owner'), async (req, res) => {
+  try {
+    const { staffId, amountPaid, paymentMode, notes } = req.body;
+    if (!staffId || amountPaid === undefined)
+      return res.status(400).json({ message: 'staffId and amountPaid are required.' });
+    if (Number(amountPaid) < 0)
+      return res.status(400).json({ message: 'amountPaid cannot be negative.' });
+
+    const saloonId = req.saloon._id;
+
+    // Determine period start
+    const lastSettlement = await SaloonSalarySettlement
+      .findOne({ saloon: saloonId, staff: staffId })
+      .sort({ settledAt: -1 })
+      .lean();
+
+    let periodFrom;
+    if (lastSettlement) {
+      periodFrom = new Date(lastSettlement.settledAt);
+    } else {
+      const staffDoc = await SaloonStaff.findById(staffId).select('joiningDate').lean();
+      periodFrom = staffDoc?.joiningDate || new Date(0);
+    }
+
+    const periodTo = new Date();
+    periodTo.setHours(23, 59, 59, 999);
+
+    // Aggregate earnings for this period
+    const [agg] = await SaloonWorkEntry.aggregate([
+      { $match: {
+          saloon: saloonId,
+          staff:  new mongoose.Types.ObjectId(staffId),
+          serviceDate: { $gte: periodFrom, $lte: periodTo }
+      }},
+      { $group: { _id: null, bills: { $sum: 1 }, revenue: { $sum: '$grandTotal' }, earning: { $sum: '$staffEarning' } } }
+    ]);
+
+    const staffDoc = await SaloonStaff.findById(staffId).select('name').lean();
+
+    const settlement = await SaloonSalarySettlement.create({
+      saloon:       saloonId,
+      staff:        staffId,
+      staffName:    staffDoc?.name || 'Unknown',
+      periodFrom,
+      periodTo,
+      totalBills:   agg?.bills   || 0,
+      totalRevenue: agg?.revenue || 0,
+      grossEarning: agg?.earning || 0,
+      amountPaid:   Number(amountPaid),
+      paymentMode:  paymentMode || 'cash',
+      notes:        notes || '',
+      paidBy:       req.staff?.name || req.saloon?.ownerName || ''
+    });
+
+    logActivity(req, req.saloon, 'salary_settled', {
+      entity: 'staff', entityId: staffId, entityName: staffDoc?.name,
+      details: { amountPaid, paymentMode }
+    });
+
+    res.json(settlement);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
