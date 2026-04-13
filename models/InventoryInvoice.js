@@ -45,6 +45,10 @@ const inventoryInvoiceSchema = new Schema({
   notes:           { type: String, trim: true },
   terms:           { type: String, trim: true },
   status:          { type: String, enum: ['draft', 'sent', 'paid', 'cancelled'], default: 'draft' },
+
+  // Source tracking
+  source:           { type: String, enum: ['inventory', 'restaurant'], default: 'inventory' },
+  restaurantOrder:  { type: Schema.Types.ObjectId, ref: 'RestaurantOrder' },
 }, { timestamps: true });
 
 inventoryInvoiceSchema.index({ business: 1, invoiceDate: -1 });
