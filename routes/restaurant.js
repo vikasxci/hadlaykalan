@@ -307,6 +307,73 @@ router.delete('/menu/:id', restaurantAuth, requirePerm('editMenu'), async (req, 
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
 
+// Aliases: /menu/items mirrors /menu  (frontend uses /menu/items pattern)
+router.get('/menu/items', restaurantAuth, async (req, res) => {
+  try {
+    const { category, type, available } = req.query;
+    const q = { restaurant:req.restaurant._id, isActive:true };
+    if (category) q.category = category;
+    if (type) q.type = type;
+    if (available === 'true') q.isAvailable = true;
+    if (available === 'false') q.isAvailable = false;
+    const items = await RestaurantMenuItem.find(q)
+      .populate('modifierGroups', 'groupName type required options')
+      .sort({ category:1, sortOrder:1, name:1 });
+    res.json(items);
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
+router.post('/menu/items', restaurantAuth, requirePerm('editMenu'), async (req, res) => {
+  try {
+    const { name, description, category, type, price, variants, taxRate, taxIncluded,
+            preparationTime, allergens, tags, sortOrder, kitchenStation, modifierGroups } = req.body;
+    if (!name || !category || price === undefined) return res.status(400).json({ message:'name, category and price are required.' });
+    const item = await RestaurantMenuItem.create({
+      restaurant:req.restaurant._id, name, description, category, type, price,
+      variants:variants||[], taxRate, taxIncluded, preparationTime,
+      allergens:allergens||[], tags:tags||[], sortOrder:sortOrder||0, kitchenStation, modifierGroups:modifierGroups||[]
+    });
+    res.status(201).json(item);
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
+router.put('/menu/items/:id', restaurantAuth, requirePerm('editMenu'), async (req, res) => {
+  try {
+    const allowed = ['name','description','category','type','price','variants','taxRate','taxIncluded',
+                     'preparationTime','allergens','tags','sortOrder','isAvailable','isActive','kitchenStation','modifierGroups'];
+    const update = {};
+    allowed.forEach(k => { if (req.body[k] !== undefined) update[k] = req.body[k]; });
+    const item = await RestaurantMenuItem.findOneAndUpdate(
+      { _id:req.params.id, restaurant:req.restaurant._id }, update, { new:true, runValidators:true }
+    );
+    if (!item) return res.status(404).json({ message:'Menu item not found.' });
+    res.json(item);
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
+router.patch('/menu/items/:id', restaurantAuth, requirePerm('editMenu'), async (req, res) => {
+  try {
+    const item = await RestaurantMenuItem.findOne({ _id:req.params.id, restaurant:req.restaurant._id });
+    if (!item) return res.status(404).json({ message:'Menu item not found.' });
+    if (req.body.isAvailable !== undefined) {
+      item.isAvailable = req.body.isAvailable;
+    } else {
+      item.isAvailable = !item.isAvailable; // toggle if no value sent
+    }
+    await item.save();
+    res.json(item);
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
+router.delete('/menu/items/:id', restaurantAuth, requirePerm('editMenu'), async (req, res) => {
+  try {
+    const item = await RestaurantMenuItem.findOneAndDelete({ _id:req.params.id, restaurant:req.restaurant._id });
+    if (!item) return res.status(404).json({ message:'Menu item not found.' });
+    await RestaurantRecipe.deleteOne({ menuItem:req.params.id, restaurant:req.restaurant._id });
+    res.json({ message:'Menu item deleted.' });
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // MODIFIERS
 // ════════════════════════════════════════════════════════════════════════════
