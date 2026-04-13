@@ -443,6 +443,31 @@ router.put('/recipe/:menuItemId', restaurantAuth, requirePerm('editMenu'), async
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// DASHBOARD STATS
+// ════════════════════════════════════════════════════════════════════════════
+
+router.get('/dashboard/stats', restaurantAuth, async (req, res) => {
+  try {
+    const rId = req.restaurant._id;
+    const today = new Date(); today.setHours(0,0,0,0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate()+1);
+    const [todayAgg, totalOrders, activeTables, pendingKOTs, hourlyData] = await Promise.all([
+      RestaurantOrder.aggregate([{$match:{restaurant:rId,status:'billed',billedAt:{$gte:today,$lt:tomorrow}}},{$group:{_id:null,total:{$sum:'$grandTotal'},count:{$sum:1}}}]),
+      RestaurantOrder.countDocuments({restaurant:rId, status:{$in:['open','preparing']}}),
+      RestaurantTable.countDocuments({restaurant:rId, status:'occupied'}),
+      RestaurantKOT.countDocuments({restaurant:rId, status:{$in:['pending','preparing']}}),
+      RestaurantOrder.aggregate([{$match:{restaurant:rId,status:'billed',billedAt:{$gte:today,$lt:tomorrow}}},{$group:{_id:{$hour:'$billedAt'},revenue:{$sum:'$grandTotal'}}},{$sort:{_id:1}}])
+    ]);
+    res.json({
+      todayRevenue: todayAgg[0]?.total || 0,
+      todayOrders:  todayAgg[0]?.count || 0,
+      totalOrders, activeTables, pendingKOTs,
+      hourlyRevenue: hourlyData.map(h => ({ h:`${h._id}:00`, v:h.revenue }))
+    });
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // ORDERS
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -469,7 +494,8 @@ router.get('/orders/:id', restaurantAuth, async (req, res) => {
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
 
-router.post('/orders', restaurantAuth, requirePerm('createOrder'), async (req, res) => {
+// ── Shared order creation logic ──────────────────────────────────────────
+async function _createOrder(req, res) {
   try {
     const { type, tableId, customerName, customerPhone, deliveryAddress, persons, items, notes } = req.body;
     if (!items?.length) return res.status(400).json({ message:'At least one item is required.' });
@@ -513,7 +539,31 @@ router.post('/orders', restaurantAuth, requirePerm('createOrder'), async (req, r
     await order.save();
     res.status(201).json({ order, kot });
   } catch(err) { res.status(500).json({ message:err.message }); }
+}
+
+// POST /api/restaurant/orders/kot  (normalises legacy payload then creates order)
+router.post('/orders/kot', restaurantAuth, requirePerm('createOrder'), async (req, res) => {
+  if (req.body.orderType && !req.body.type) req.body.type = req.body.orderType;
+  if (req.body.customer) {
+    if (!req.body.customerName) req.body.customerName = req.body.customer.name;
+    if (!req.body.customerPhone) req.body.customerPhone = req.body.customer.phone;
+    delete req.body.customer;
+  }
+  if (Array.isArray(req.body.items)) {
+    req.body.items = await Promise.all(req.body.items.map(async i => {
+      if (!i.name && (i.menuItem||i.menuItemId)) {
+        const id = i.menuItemId||i.menuItem;
+        const mi = await RestaurantMenuItem.findById(id).lean();
+        if (mi) { i.menuItemId=id; i.name=mi.name; i.price=mi.price; i.taxRate=mi.taxRate||5; i.category=mi.category; i.station=mi.kitchenStation||'Main Kitchen'; }
+      }
+      return i;
+    }));
+  }
+  return _createOrder(req, res);
 });
+
+// POST /api/restaurant/orders
+router.post('/orders', restaurantAuth, requirePerm('createOrder'), (req, res) => _createOrder(req, res));
 
 router.put('/orders/:id/items', restaurantAuth, requirePerm('editOrder'), async (req, res) => {
   try {
@@ -663,12 +713,24 @@ router.get('/kds', restaurantAuth, async (req, res) => {
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
 
+// PATCH /kds/:kotId  — mark entire KOT ready or bumped
+router.patch('/kds/:kotId', restaurantAuth, async (req, res) => {
+  try {
+    const kot=await RestaurantKOT.findOne({ _id:req.params.kotId, restaurant:req.restaurant._id });
+    if (!kot) return res.status(404).json({ message:'KOT not found.' });
+    kot.status='ready'; kot.completedAt=new Date(); kot.items.forEach(i=>{ if(i.status!=='cancelled') i.status='ready'; });
+    await kot.save(); res.json(kot);
+  } catch(err) { res.status(500).json({ message:err.message }); }
+});
+
 router.patch('/kds/:kotId/items/:itemId', restaurantAuth, async (req, res) => {
   try {
     const { status } = req.body;
     const kot=await RestaurantKOT.findOne({ _id:req.params.kotId, restaurant:req.restaurant._id });
     if (!kot) return res.status(404).json({ message:'KOT not found.' });
-    const item=kot.items.id(req.params.itemId);
+    // Support both MongoDB _id and numeric array index
+    let item = kot.items.id(req.params.itemId);
+    if (!item) { const idx=parseInt(req.params.itemId); if(!isNaN(idx)&&idx>=0&&idx<kot.items.length) item=kot.items[idx]; }
     if (!item) return res.status(404).json({ message:'Item not found in KOT.' });
     item.status=status; if(status==='ready') item.readyAt=new Date();
     if(kot.items.every(i=>i.status==='ready'||i.status==='cancelled')) { kot.status='ready'; kot.completedAt=new Date(); }
@@ -827,7 +889,14 @@ router.get('/reports', restaurantAuth, requirePerm('viewReports'), async (req, r
         {$sort:{orders:-1}},{$limit:10}
       ])
     ]);
-    res.json({ stats:summary[0]||{totalRevenue:0,totalOrders:0,avgOrderValue:0}, dailyRevenue:daily, topDishes, typeBreakdown, paymentBreakdown, staffPerformance:staffPerf });
+    res.json({
+      stats: summary[0]||{totalRevenue:0,totalOrders:0,avgOrderValue:0},
+      revenueByDay: daily.map(d=>({date:d._id, revenue:d.revenue, orders:d.orders})),
+      topDishes: topDishes.map(d=>({name:d._id?.name||String(d._id), category:d._id?.category||'', qty:d.qty, revenue:d.revenue})),
+      typeBreakdown,
+      paymentBreakdown: paymentBreakdown.map(p=>({mode:p._id, amount:p.revenue, count:p.count})),
+      staffPerformance: staffPerf.map(s=>({name:s.waiterName||String(s._id), orders:s.orders, revenue:s.revenue}))
+    });
   } catch(err) { res.status(500).json({ message:err.message }); }
 });
 
