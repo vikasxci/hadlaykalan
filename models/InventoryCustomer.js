@@ -22,10 +22,18 @@ const inventoryCustomerSchema = new Schema({
   outstandingDue: { type: Number, default: 0 },
   lastPurchaseAt: { type: Date },
   isActive:       { type: Boolean, default: true },
+
+  // Restaurant-specific stats (updated when restaurant orders are billed)
+  totalRestaurantOrders: { type: Number, default: 0 },
+  totalRestaurantSpent:  { type: Number, default: 0 },
+  lastDineAt:            { type: Date },
+  avgRestaurantOrder:    { type: Number, default: 0 },
+  restaurantNotes:       { type: String, trim: true },   // dietary preferences, allergies
+  loyaltyPoints:         { type: Number, default: 0 },
 }, { timestamps: true });
 
 inventoryCustomerSchema.index({ business: 1, name: 1 });
 inventoryCustomerSchema.index({ business: 1, phone: 1 });
 inventoryCustomerSchema.index({ business: 1, isActive: 1 });
 
-module.exports = mongoose.model('InventoryCustomer', inventoryCustomerSchema);
+module.exports = mongoose.models.InventoryCustomer || mongoose.model('InventoryCustomer', inventoryCustomerSchema);
