@@ -48,6 +48,7 @@ app.use('/api/shop', require('./routes/shop'));
 app.use('/api/uptime', require('./routes/uptime'));
 app.use('/api/inventory', require('./routes/inventory'));
 app.use('/api/restaurant', require('./routes/restaurant'));
+app.use('/api/saloon', require('./routes/saloon'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
