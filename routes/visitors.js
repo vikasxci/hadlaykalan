@@ -384,6 +384,119 @@ router.get('/admin/stats', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+// PUT - Update GPS location for visitor
+router.put('/update-location', async (req, res) => {
+  try {
+    const { visitorToken, latitude, longitude, locationName, accuracy } = req.body;
+    if (!visitorToken) return res.status(400).json({ message: 'Token required' });
+
+    let visitor = null;
+    try {
+      jwt.verify(visitorToken, process.env.JWT_SECRET);
+      visitor = await Visitor.findOne({ visitorToken });
+    } catch (e) { /* invalid token */ }
+
+    if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
+
+    visitor.latitude = latitude;
+    visitor.longitude = longitude;
+    visitor.locationName = locationName || '';
+    visitor.locationAccuracy = accuracy || null;
+    visitor.locationUpdatedAt = new Date();
+    visitor.locationDenied = false;
+    await visitor.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT - Mark GPS permission denied
+router.put('/location-denied', async (req, res) => {
+  try {
+    const { visitorToken } = req.body;
+    if (!visitorToken) return res.status(400).json({ message: 'Token required' });
+
+    let visitor = null;
+    try {
+      jwt.verify(visitorToken, process.env.JWT_SECRET);
+      visitor = await Visitor.findOne({ visitorToken });
+    } catch (e) { /* invalid token */ }
+
+    if (visitor) {
+      visitor.locationDenied = true;
+      await visitor.save();
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST - Track activity (clicks, page views, page switches, etc.)
+router.post('/track-activity', async (req, res) => {
+  try {
+    const { visitorToken, events } = req.body;
+    if (!visitorToken || !Array.isArray(events) || events.length === 0) {
+      return res.status(400).json({ message: 'Token and events required' });
+    }
+
+    let visitor = null;
+    try {
+      jwt.verify(visitorToken, process.env.JWT_SECRET);
+      visitor = await Visitor.findOne({ visitorToken });
+    } catch (e) { /* invalid token */ }
+
+    if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
+
+    // Append activity events (cap log at 2000 entries per visitor)
+    const allowed = ['page_view', 'click', 'page_switch', 'session_start', 'session_end', 'search', 'scroll', 'form_submit', 'external_link', 'other'];
+    const sanitized = events.slice(0, 50).map(e => ({
+      type: allowed.includes(e.type) ? e.type : 'other',
+      page: (e.page || '').substring(0, 200),
+      fromPage: (e.fromPage || '').substring(0, 200),
+      element: (e.element || '').substring(0, 100),
+      elementText: (e.elementText || '').substring(0, 80),
+      elementId: (e.elementId || '').substring(0, 80),
+      elementClass: (e.elementClass || '').substring(0, 100),
+      value: (e.value || '').substring(0, 200),
+      timeOnPage: typeof e.timeOnPage === 'number' ? e.timeOnPage : null,
+      ts: e.ts ? new Date(e.ts) : new Date()
+    }));
+
+    // Update pages visited list
+    sanitized.forEach(ev => {
+      if ((ev.type === 'page_view' || ev.type === 'page_switch') && ev.page && !visitor.pages.includes(ev.page)) {
+        visitor.pages.push(ev.page);
+      }
+    });
+
+    // Accumulate total time
+    const addedTime = sanitized.reduce((sum, e) => sum + (e.timeOnPage || 0), 0);
+    visitor.totalTimeOnSite = (visitor.totalTimeOnSite || 0) + addedTime;
+
+    // Keep last 2000 activity events
+    visitor.activityLog = [...visitor.activityLog, ...sanitized].slice(-2000);
+    await visitor.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET - Single visitor full profile (admin)
+router.get('/admin/profile/:id', auth, async (req, res) => {
+  try {
+    const visitor = await Visitor.findById(req.params.id);
+    if (!visitor) return res.status(404).json({ message: 'Not found' });
+    res.json(visitor);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 
 // DELETE - Delete a visitor record (admin)
 router.delete('/:id', auth, async (req, res) => {
