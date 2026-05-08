@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const Post = require('../models/Post');
 const auth = require('../middleware/auth');
 const upload = require('../middleware/upload');
-const cloudinary = require('cloudinary').v2;
+const cloudinary = require('cloudinary').v2
 
 // GET all approved posts (public)
 router.get('/', async (req, res) => {
@@ -45,8 +45,11 @@ router.post('/', upload.fields([
   { name: 'postImage', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const { name, title, content, topic } = req.body;
-    if (!name || !title || !content) {
+    const { name, title, content, topic, visitorToken, visitorName } = req.body;
+
+    // Resolve author name: prefer visitorName from token, fallback to submitted name
+    const authorName = (visitorName || name || '').trim();
+    if (!authorName || !title || !content) {
       return res.status(400).json({ message: 'Name, title and content are required' });
     }
 
@@ -54,7 +57,8 @@ router.post('/', upload.fields([
     const editToken = crypto.randomBytes(32).toString('hex');
 
     const postData = {
-      name: name.trim(),
+      name: authorName,
+      visitorToken: visitorToken || '',
       title: title.trim(),
       content: content.trim(),
       topic: topic && ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'other'].includes(topic) ? topic : 'message',
@@ -203,6 +207,130 @@ router.put('/:id/user-edit', upload.fields([
   }
 });
 
+// ============ COMMENT ROUTES ============
+
+// GET comments for a post
+router.get('/:id/comments', async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).select('comments');
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    // Strip private fields from comments
+    const comments = post.comments.map(c => ({
+      _id: c._id,
+      visitorName: c.visitorName,
+      text: c.text,
+      likes: c.likes,
+      createdAt: c.createdAt,
+      // Tell caller if this visitor has liked the comment
+      liked: req.query.visitorToken ? c.likedTokens.includes(req.query.visitorToken) : false
+    }));
+    res.json(comments);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST add a comment (uses visitorToken + visitorName — no manual name required)
+router.post('/:id/comments', async (req, res) => {
+  try {
+    const { visitorToken, visitorName, text } = req.body;
+    if (!visitorToken) return res.status(400).json({ message: 'Visitor token required' });
+    if (!visitorName || !visitorName.trim()) return res.status(400).json({ message: 'Visitor name required' });
+    if (!text || !text.trim()) return res.status(400).json({ message: 'Comment text required' });
+    if (text.trim().length > 500) return res.status(400).json({ message: 'Comment too long (max 500 chars)' });
+
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    const comment = {
+      visitorToken,
+      visitorName: visitorName.trim(),
+      text: text.trim(),
+      likes: 0,
+      likedTokens: [],
+      createdAt: new Date()
+    };
+    post.comments.push(comment);
+    await post.save();
+
+    const saved = post.comments[post.comments.length - 1];
+    res.status(201).json({
+      _id: saved._id,
+      visitorName: saved.visitorName,
+      text: saved.text,
+      likes: saved.likes,
+      createdAt: saved.createdAt,
+      liked: false
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST like/unlike a comment
+router.post('/:id/comments/:commentId/like', async (req, res) => {
+  try {
+    const { visitorToken } = req.body;
+    if (!visitorToken) return res.status(400).json({ message: 'Visitor token required' });
+
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    const comment = post.comments.id(req.params.commentId);
+    if (!comment) return res.status(404).json({ message: 'Comment not found' });
+
+    const alreadyLiked = comment.likedTokens.includes(visitorToken);
+    if (alreadyLiked) {
+      comment.likedTokens = comment.likedTokens.filter(t => t !== visitorToken);
+      comment.likes = Math.max(0, comment.likes - 1);
+    } else {
+      comment.likedTokens.push(visitorToken);
+      comment.likes += 1;
+    }
+    await post.save();
+    res.json({ likes: comment.likes, liked: !alreadyLiked });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE a comment (author or admin)
+router.delete('/:id/comments/:commentId', async (req, res) => {
+  try {
+    const { visitorToken } = req.body;
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    const comment = post.comments.id(req.params.commentId);
+    if (!comment) return res.status(404).json({ message: 'Comment not found' });
+
+    // Allow deletion only by the comment author (via visitorToken) or admin
+    const isAdmin = req.headers.authorization && await verifyAdminToken(req.headers.authorization);
+    if (!isAdmin && comment.visitorToken !== visitorToken) {
+      return res.status(403).json({ message: 'Not authorized to delete this comment' });
+    }
+
+    comment.deleteOne();
+    await post.save();
+    res.json({ message: 'Comment deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Helper to verify admin token (reuse auth middleware logic)
+async function verifyAdminToken(authHeader) {
+  try {
+    const jwt = require('jsonwebtoken');
+    const token = authHeader.replace('Bearer ', '');
+    jwt.verify(token, process.env.JWT_SECRET);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ============ ADMIN ROUTES ============
 
 // GET all posts (admin)
@@ -261,6 +389,32 @@ router.put('/:id/toggle-approval', auth, async (req, res) => {
     post.isApproved = !post.isApproved;
     await post.save();
     res.json(post);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET all comments for a post (admin — includes visitorToken)
+router.get('/:id/admin/comments', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).select('comments title name');
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+    res.json({ postTitle: post.title, postAuthor: post.name, comments: post.comments });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// DELETE a comment (admin — no token check)
+router.delete('/:id/admin/comments/:commentId', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+    const comment = post.comments.id(req.params.commentId);
+    if (!comment) return res.status(404).json({ message: 'Comment not found' });
+    comment.deleteOne();
+    await post.save();
+    res.json({ message: 'Comment deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
