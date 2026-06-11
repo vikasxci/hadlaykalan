@@ -84,6 +84,24 @@ router.post('/track', async (req, res) => {
         visitor.ipAddresses.push(ip);
       }
 
+      // ── Streak calculation ──────────────────────────────────
+      const todayStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+      if (visitor.lastStreakDate !== todayStr) {
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toISOString().slice(0, 10);
+        if (visitor.lastStreakDate === yesterdayStr) {
+          visitor.currentStreak = (visitor.currentStreak || 1) + 1;
+        } else {
+          visitor.currentStreak = 1; // streak broken
+        }
+        if (visitor.currentStreak > (visitor.longestStreak || 1)) {
+          visitor.longestStreak = visitor.currentStreak;
+        }
+        visitor.lastStreakDate = todayStr;
+      }
+      // ───────────────────────────────────────────────────────
+
       // Re-issue JWT if visitor had old-format token (migration)
       if (visitor.visitorToken && !visitor.visitorToken.startsWith('eyJ')) {
         const freshToken = jwt.sign(
@@ -102,6 +120,8 @@ router.post('/track', async (req, res) => {
         visitorToken: visitor.visitorToken,
         visitorName: visitor.visitorName,
         visitCount: visitor.visitCount,
+        currentStreak: visitor.currentStreak,
+        longestStreak: visitor.longestStreak,
         needsRegistration: !visitor.isRegistered && visitor.visitCount >= 5,
         isRegistered: visitor.isRegistered
       });
@@ -141,7 +161,10 @@ router.post('/track', async (req, res) => {
         timezone: timezone || '',
         referrer: referrer || '',
         platform: platform || '',
-        pages: page ? [page] : []
+        pages: page ? [page] : [],
+        currentStreak: 1,
+        longestStreak: 1,
+        lastStreakDate: new Date().toISOString().slice(0, 10)
       };
 
       // Geo lookup
@@ -172,6 +195,8 @@ router.post('/track', async (req, res) => {
         visitorToken: newToken,
         visitorName: newVisitor.visitorName,
         visitCount: 1,
+        currentStreak: 1,
+        longestStreak: 1,
         needsRegistration: false,
         isRegistered: false
       };
@@ -184,6 +209,41 @@ router.post('/track', async (req, res) => {
     }
   } catch (err) {
     console.error('Visitor tracking error:', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET - Top 10 streak leaderboard (public)
+router.get('/streaks', async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+
+    const top = await Visitor.find({ currentStreak: { $gte: 1 } })
+      .sort({ currentStreak: -1, longestStreak: -1 })
+      .limit(limit)
+      .select('visitorName registeredName registeredPhoto currentStreak longestStreak lastStreakDate isRegistered');
+
+    const leaderboard = top.map((v, i) => {
+      // If last streak date is not today or yesterday, the streak is stale
+      const isActive = v.lastStreakDate === today || v.lastStreakDate === yesterdayStr;
+      return {
+        rank: i + 1,
+        name: v.isRegistered ? v.registeredName : v.visitorName,
+        photo: v.registeredPhoto || null,
+        currentStreak: isActive ? v.currentStreak : 0,
+        longestStreak: v.longestStreak,
+        isActive,
+        isRegistered: v.isRegistered
+      };
+    }).filter(v => v.currentStreak > 0);
+
+    res.json({ success: true, leaderboard });
+  } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
@@ -384,6 +444,72 @@ router.get('/admin/stats', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
+
+// PATCH - Set a display nickname (from streak popup name prompt)
+// GET - Fetch current visitor profile by token
+router.get('/me', async (req, res) => {
+  try {
+    const visitorToken = req.headers['x-visitor-token'] || req.query.token;
+    if (!visitorToken) return res.status(400).json({ message: 'Token required' });
+    const visitor = await Visitor.findOne({ visitorToken })
+      .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea visitCount firstVisit lastVisit currentStreak longestStreak isRegistered city region country');
+    if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
+    res.json({
+      success: true,
+      name: visitor.visitorName,
+      phone: visitor.registeredPhone || '',
+      photo: visitor.registeredPhoto || '',
+      profession: visitor.registeredProfession || '',
+      area: visitor.registeredArea || '',
+      visitCount: visitor.visitCount,
+      firstVisit: visitor.firstVisit,
+      lastVisit: visitor.lastVisit,
+      currentStreak: visitor.currentStreak,
+      longestStreak: visitor.longestStreak,
+      city: visitor.city || '',
+      region: visitor.region || '',
+      isRegistered: visitor.isRegistered
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PATCH - Update visitor profile (name, profession, area, phone)
+router.patch('/profile', async (req, res) => {
+  try {
+    const { visitorToken, name, profession, area, phone } = req.body;
+    if (!visitorToken) return res.status(400).json({ message: 'Token required' });
+    const visitor = await Visitor.findOne({ visitorToken });
+    if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
+    if (name && name.trim())       visitor.visitorName          = name.trim().slice(0, 30);
+    if (profession !== undefined)  visitor.registeredProfession = profession.trim().slice(0, 50);
+    if (area !== undefined)        visitor.registeredArea       = area.trim().slice(0, 50);
+    if (phone !== undefined)       visitor.registeredPhone      = phone.trim().slice(0, 15);
+    await visitor.save();
+    res.json({ success: true, name: visitor.visitorName });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.patch('/nickname', async (req, res) => {
+  try {
+    const { visitorToken, nickname } = req.body;
+    if (!visitorToken || !nickname || !nickname.trim()) {
+      return res.status(400).json({ message: 'Token and nickname required' });
+    }
+    const clean = nickname.trim().slice(0, 30);
+    const visitor = await Visitor.findOne({ visitorToken });
+    if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
+    visitor.visitorName = clean;
+    await visitor.save();
+    res.json({ success: true, visitorName: clean });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // PUT - Update GPS location for visitor
 router.put('/update-location', async (req, res) => {
   try {
@@ -496,7 +622,6 @@ router.get('/admin/profile/:id', auth, async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 });
-
 
 // DELETE - Delete a visitor record (admin)
 router.delete('/:id', auth, async (req, res) => {
