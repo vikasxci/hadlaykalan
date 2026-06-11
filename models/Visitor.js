@@ -46,6 +46,10 @@ const visitorSchema = new mongoose.Schema({
   totalTimeOnSite: { type: Number, default: 0 }, // ms
   lastVisit: { type: Date, default: Date.now },
   firstVisit: { type: Date, default: Date.now },
+  // Streak fields
+  currentStreak: { type: Number, default: 1 },
+  longestStreak: { type: Number, default: 1 },
+  lastStreakDate: { type: String, default: null }, // 'YYYY-MM-DD'
   pages: [{ type: String }],
   activityLog: { type: [activitySchema], default: [] },
   // Registration fields
