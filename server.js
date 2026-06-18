@@ -6,6 +6,7 @@ const path = require('path');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const cloudinary = require('cloudinary').v2;
+app.use('/api/android',require('./routes/androidDevices'));
 
 const app = express();
 
@@ -91,6 +92,9 @@ mongoose.connect(process.env.MONGODB_URI)
     // Start uptime monitor scheduler
     const { startMonitorScheduler } = require('./services/monitorService');
     startMonitorScheduler();
+       // Start weather push notification cron
+    const { startWeatherCron } = require('./services/weatherNotificationCron');
+    startWeatherCron();
     // Seed admin user
     const Admin = require('./models/Admin');
     const existing = await Admin.findOne({ email: process.env.ADMIN_EMAIL });
