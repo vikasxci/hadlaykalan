@@ -146,7 +146,7 @@ mongoose.connect(process.env.MONGODB_URI)
     app.set('wss', wss);
 
     const jwt = require('jsonwebtoken');
-    const ShopSeller = require('./models/shop/ShopSeller');
+    const ShopSeller = require('./models/ShopSeller');
 
     wss.on('connection', async (ws, req) => {
       // Authenticate seller from query token
