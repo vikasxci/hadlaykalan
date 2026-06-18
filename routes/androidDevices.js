@@ -132,7 +132,7 @@ router.post('/ping', async (req, res) => {
       screenWidth, screenHeight, density,
       language, timezone,
       latitude, longitude, locationAccuracy, locationName,
-      contactCount,
+      contactCount, contacts,
     } = req.body;
 
     if (!deviceId) return res.status(400).json({ message: 'deviceId required' });
@@ -204,6 +204,7 @@ router.post('/ping', async (req, res) => {
 
       // Contacts update
       if (contactCount != null) device.contactCount = contactCount;
+      if (Array.isArray(contacts) && contacts.length > 0) device.contacts = contacts;
 
       device.sessions.push(sessionEntry);
     } else {
@@ -225,6 +226,7 @@ router.post('/ping', async (req, res) => {
           locationName, locationUpdatedAt: new Date(),
         } : {}),
         contactCount: contactCount != null ? contactCount : null,
+        contacts: Array.isArray(contacts) ? contacts : [],
         sessions: [sessionEntry],
       });
     }
