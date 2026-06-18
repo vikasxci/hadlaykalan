@@ -116,9 +116,9 @@ async function sendFcmMulticast(tokens, title, body, data = {}) {
   return { success, failure };
 }
 
-// Export for use by cron job
-module.exports.sendFcmMulticast = sendFcmMulticast;
-module.exports.sendFcmToToken   = sendFcmToToken;
+// Attach helpers to router so they survive the `module.exports = router` below
+router.sendFcmMulticast = sendFcmMulticast;
+router.sendFcmToToken   = sendFcmToToken;
 
 // ── PUBLIC: App sends ping on launch ────────────────────────
 // POST /api/android/ping
@@ -382,13 +382,13 @@ router.post('/notify', auth, async (req, res) => {
     if (!title || !body) return res.status(400).json({ message: 'title and body required' });
 
     const devices = await AndroidDevice.find(
-      { fcmToken: { $ne: null }, notificationsEnabled: true },
+      { fcmToken: { $exists: true, $ne: null } },
       'fcmToken'
     );
     const tokens = devices.map(d => d.fcmToken).filter(Boolean);
 
     if (!tokens.length) {
-      return res.json({ success: true, message: 'No subscribed devices', sent: 0, failed: 0 });
+      return res.json({ success: true, message: 'No devices with push token registered', sent: 0, failed: 0 });
     }
 
     const result = await sendFcmMulticast(tokens, title, body, data || {});
