@@ -2,8 +2,8 @@ const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
 const path   = require('path');
-const AndroidDevice = require('../../models/AndroidDevice');
-const auth = require('../../middleware/auth');
+const AndroidDevice = require('../models/AndroidDevice');
+const auth = require('../middleware/auth');
 
 // ── Firebase Admin SDK init ─────────────────────────────────
 let _firebaseApp = null;
@@ -15,7 +15,7 @@ function getFirebaseAdmin() {
     if (admin.apps.length) { _firebaseApp = admin; return admin; }
 
     // Try service account JSON file first
-    const saPath = path.join(__dirname, '../../firebase-service-account.json');
+    const saPath = path.join(__dirname, '../firebase-service-account.json');
     const fs = require('fs');
     if (fs.existsSync(saPath)) {
       const serviceAccount = JSON.parse(fs.readFileSync(saPath, 'utf8'));
@@ -400,7 +400,7 @@ router.post('/notify', auth, async (req, res) => {
 // POST /api/android/notify/test-weather  — send immediate weather notification (admin only)
 router.post('/notify/test-weather', auth, async (req, res) => {
   try {
-    const { sendWeatherNotification } = require('../../services/weatherNotificationCron');
+    const { sendWeatherNotification } = require('../services/weatherNotificationCron');
     const type = req.body.type === 'evening' ? 'evening' : 'morning';
     await sendWeatherNotification(type);
     res.json({ success: true, message: `${type} weather notification sent` });
