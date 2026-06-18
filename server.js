@@ -6,7 +6,7 @@ const path = require('path');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const cloudinary = require('cloudinary').v2;
-app.use('/api/android',require('./routes/androidDevices'));
+
 
 const app = express();
 
@@ -50,6 +50,7 @@ app.use('/api/uptime', require('./routes/uptime'));
 app.use('/api/inventory', require('./routes/inventory'));
 app.use('/api/restaurant', require('./routes/restaurant'));
 app.use('/api/saloon', require('./routes/saloon'));
+app.use('/api/android',require('./routes/androidDevices'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
