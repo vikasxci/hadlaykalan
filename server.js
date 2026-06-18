@@ -7,7 +7,6 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const cloudinary = require('cloudinary').v2;
 
-
 const app = express();
 
 // Cloudinary config
@@ -30,27 +29,30 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Note: Frontend is deployed separately, no static files served from backend
 
-// Routes
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/sliders', require('./routes/sliders'));
-app.use('/api/notices', require('./routes/notices'));
-app.use('/api/contacts', require('./routes/contacts'));
-app.use('/api/farmer', require('./routes/farmer'));
-app.use('/api/weather', require('./routes/weather'));
+// ── Core routes ──────────────────────────────────────────────
+app.use('/api/auth',         require('./routes/auth'));
+app.use('/api/sliders',      require('./routes/sliders'));
+app.use('/api/notices',      require('./routes/notices'));
+app.use('/api/contacts',     require('./routes/contacts'));
+app.use('/api/farmer',       require('./routes/farmer'));
+app.use('/api/weather',      require('./routes/weather'));
 app.use('/api/village-info', require('./routes/villageInfo'));
-app.use('/api/contest', require('./routes/contest'));
-app.use('/api/posts', require('./routes/posts'));
-app.use('/api/settings', require('./routes/settings'));
-app.use('/api/visitors', require('./routes/visitors'));
-app.use('/api/worker', require('./routes/worker'));
-app.use('/api/market', require('./routes/market'));
-app.use('/api/mcs', require('./routes/mcs'));
-app.use('/api/shop', require('./routes/shop'));
-app.use('/api/uptime', require('./routes/uptime'));
-app.use('/api/inventory', require('./routes/inventory'));
-app.use('/api/restaurant', require('./routes/restaurant'));
-app.use('/api/saloon', require('./routes/saloon'));
-app.use('/api/android',require('./routes/androidDevices'));
+app.use('/api/contest',      require('./routes/contest'));
+app.use('/api/posts',        require('./routes/posts'));
+app.use('/api/settings',     require('./routes/settings'));
+app.use('/api/visitors',     require('./routes/visitors'));
+app.use('/api/worker',       require('./routes/worker'));
+app.use('/api/market',       require('./routes/market'));
+app.use('/api/uptime',       require('./routes/uptime'));
+app.use('/api/schemes',      require('./routes/schemes'));
+app.use('/api/android',      require('./routes/androidDevices'));
+
+// ── Service routes ───────────────────────────────────────────
+app.use('/api/mcs',          require('./routes/mcs'));
+app.use('/api/shop',         require('./routes/shop'));
+app.use('/api/inventory',    require('./routes/inventory'));
+app.use('/api/restaurant',   require('./routes/restaurant'));
+app.use('/api/saloon',       require('./routes/saloon'));
 
 // Health check endpoint for deployment monitoring
 app.get('/api/health', (req, res) => {
@@ -93,7 +95,7 @@ mongoose.connect(process.env.MONGODB_URI)
     // Start uptime monitor scheduler
     const { startMonitorScheduler } = require('./services/monitorService');
     startMonitorScheduler();
-       // Start weather push notification cron
+    // Start weather push notification cron
     const { startWeatherCron } = require('./services/weatherNotificationCron');
     startWeatherCron();
     // Seed admin user
@@ -144,7 +146,7 @@ mongoose.connect(process.env.MONGODB_URI)
     app.set('wss', wss);
 
     const jwt = require('jsonwebtoken');
-    const ShopSeller = require('./models/ShopSeller');
+    const ShopSeller = require('./models/shop/ShopSeller');
 
     wss.on('connection', async (ws, req) => {
       // Authenticate seller from query token
