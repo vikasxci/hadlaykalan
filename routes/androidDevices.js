@@ -5,31 +5,35 @@ const path   = require('path');
 const AndroidDevice = require('../models/AndroidDevice');
 const auth = require('../middleware/auth');
 
-// ── Firebase Admin SDK init ─────────────────────────────────
-let _firebaseApp = null;
+// ── Firebase Admin SDK init (v12+ modular API) ─────────────
+let _messaging = null;
 
-function getFirebaseAdmin() {
-  if (_firebaseApp) return _firebaseApp;
+function getMessagingInstance() {
+  if (_messaging) return _messaging;
   try {
-    const admin = require('firebase-admin');
-    if (admin.apps.length) { _firebaseApp = admin; return admin; }
-
-    // Try service account JSON file first
+    const { initializeApp, getApps, cert } = require('firebase-admin/app');
+    const { getMessaging } = require('firebase-admin/messaging');
+    const fs   = require('fs');
     const saPath = path.join(__dirname, '../firebase-service-account.json');
-    const fs = require('fs');
-    if (fs.existsSync(saPath)) {
+
+    let app;
+    if (getApps().length > 0) {
+      // Already initialized (e.g. by another require)
+      app = getApps()[0];
+    } else if (fs.existsSync(saPath)) {
       const serviceAccount = JSON.parse(fs.readFileSync(saPath, 'utf8'));
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      app = initializeApp({ credential: cert(serviceAccount) });
       console.log('[FCM] Firebase Admin initialized with service account file');
     } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      app = initializeApp({ credential: cert(serviceAccount) });
       console.log('[FCM] Firebase Admin initialized with env JSON');
     } else {
-      throw new Error('No Firebase service account found. Place firebase-service-account.json in Admin/ folder.');
+      throw new Error('No Firebase service account found. Place firebase-service-account.json in Admin/ folder or set FIREBASE_SERVICE_ACCOUNT_JSON env var.');
     }
-    _firebaseApp = admin;
-    return admin;
+
+    _messaging = getMessaging(app);
+    return _messaging;
   } catch (err) {
     console.error('[FCM] Firebase Admin init error:', err.message);
     throw err;
@@ -68,7 +72,7 @@ async function lookupIp(ip) {
 
 // Send FCM push to a single token via Firebase Admin SDK
 async function sendFcmToToken(fcmToken, title, body, data = {}) {
-  const admin = getFirebaseAdmin();
+  const messaging = getMessagingInstance();
   const stringData = {};
   for (const [k, v] of Object.entries(data)) stringData[k] = String(v);
 
@@ -81,13 +85,13 @@ async function sendFcmToToken(fcmToken, title, body, data = {}) {
       notification: { channelId: 'hadlay_default', sound: 'default' },
     },
   };
-  return admin.messaging().send(message);
+  return messaging.send(message);
 }
 
 // Send to a list of tokens in batches of 500
 async function sendFcmMulticast(tokens, title, body, data = {}) {
   if (!tokens.length) return { success: 0, failure: 0 };
-  const admin = getFirebaseAdmin();
+  const messaging = getMessagingInstance();
   const stringData = {};
   for (const [k, v] of Object.entries(data)) stringData[k] = String(v);
 
@@ -97,7 +101,7 @@ async function sendFcmMulticast(tokens, title, body, data = {}) {
   for (let i = 0; i < tokens.length; i += BATCH) {
     const batch = tokens.slice(i, i + BATCH);
     try {
-      const response = await admin.messaging().sendEachForMulticast({
+      const response = await messaging.sendEachForMulticast({
         tokens: batch,
         notification: { title, body },
         data: stringData,
