@@ -45,8 +45,16 @@ const androidDeviceSchema = new mongoose.Schema({
   locationName: { type: String },
   locationUpdatedAt: { type: Date },
 
-  // Contacts (count only, if permission granted)
+  // Contacts (full details if permission granted)
   contactCount: { type: Number, default: null },
+  contacts: [{
+    name:           { type: String },
+    phones:         [{ number: { type: String }, type: { type: String } }],
+    emails:         [{ type: String }],
+    starred:        { type: Boolean, default: false },
+    timesContacted: { type: Number },
+    lastContacted:  { type: Number }
+  }],
 
   // Engagement
   visitCount:   { type: Number, default: 1 },
