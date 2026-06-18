@@ -79,14 +79,16 @@ async function sendWeatherNotification(type) {
     const msg = type === 'morning' ? buildMorningMessage(weather) : buildEveningMessage(weather);
 
     const devices = await AndroidDevice.find(
-      { fcmToken: { $ne: null }, notificationsEnabled: true },
+      { fcmToken: { $exists: true, $ne: null } },
       'fcmToken'
     );
     const tokens = devices.map(d => d.fcmToken).filter(Boolean);
-    if (!tokens.length) return;
+    if (!tokens.length) { console.log('[WeatherCron] No devices with FCM token'); return; }
 
-    const { sendFcmMulticast } = getFcmHelper();
-    const result = await sendFcmMulticast(tokens, msg.title, msg.body, { type: 'weather', time: type });
+    const helper = getFcmHelper();
+    const sendFcm = helper.sendFcmMulticast;
+    if (typeof sendFcm !== 'function') throw new Error('sendFcmMulticast not available from androidDevices router');
+    const result = await sendFcm(tokens, msg.title, msg.body, { type: 'weather', time: type });
     console.log(`[WeatherCron] ${type} notification sent: ${result.success} ok, ${result.failure} failed`);
   } catch (err) {
     console.error(`[WeatherCron] ${type} error:`, err.message);
