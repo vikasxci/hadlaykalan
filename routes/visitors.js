@@ -498,7 +498,7 @@ router.get('/nearby', async (req, res) => {
     const activeSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
 
     const currentVisitor = await Visitor.findOne({ visitorToken })
-      .select('visitorName registeredName latitude longitude locationName locationUpdatedAt');
+      .select('visitorName registeredName registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak');
     if (!currentVisitor) return res.status(404).json({ message: 'Visitor not found' });
 
     const others = await Visitor.find({
@@ -508,7 +508,7 @@ router.get('/nearby', async (req, res) => {
       locationUpdatedAt: { $gte: activeSince },
       locationDenied: { $ne: true }
     })
-      .select('visitorName registeredName registeredProfession registeredArea latitude longitude locationName locationUpdatedAt')
+      .select('visitorName registeredName registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak firstVisit city region country isRegistered')
       .sort({ locationUpdatedAt: -1 })
       .limit(100);
 
@@ -529,9 +529,17 @@ router.get('/nearby', async (req, res) => {
         const displayName = (visitor.registeredName || visitor.visitorName || 'Hadlay user').trim();
         return {
           name: displayName,
+          photo: visitor.registeredPhoto || '',
           profession: visitor.registeredProfession || '',
           area: visitor.registeredArea || '',
           locationName: visitor.locationName || visitor.registeredArea || 'स्थान उपलब्ध नहीं',
+          city: visitor.city || '',
+          region: visitor.region || '',
+          country: visitor.country || '',
+          visitCount: visitor.visitCount || 0,
+          currentStreak: visitor.currentStreak || 0,
+          firstVisit: visitor.firstVisit || null,
+          isRegistered: Boolean(visitor.isRegistered),
           distanceKm: distanceKm != null ? Number(distanceKm.toFixed(1)) : null,
           distanceLabel: distanceKm == null ? '' : (distanceKm < 1 ? '< 1 km' : `${distanceKm.toFixed(1)} km`),
           updatedAt: visitor.locationUpdatedAt
@@ -550,7 +558,12 @@ router.get('/nearby', async (req, res) => {
       canMeasureDistance: hasCurrentCoords,
       currentVisitor: {
         name: (currentVisitor.registeredName || currentVisitor.visitorName || '').trim(),
-        locationName: currentVisitor.locationName || ''
+        photo: currentVisitor.registeredPhoto || '',
+        profession: currentVisitor.registeredProfession || '',
+        area: currentVisitor.registeredArea || '',
+        locationName: currentVisitor.locationName || '',
+        visitCount: currentVisitor.visitCount || 0,
+        currentStreak: currentVisitor.currentStreak || 0
       },
       nearbyVisitors
     });
