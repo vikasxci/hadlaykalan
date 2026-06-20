@@ -2,8 +2,18 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const Visitor = require('../models/Visitor');
+const LocationHistory = require('../models/LocationHistory');
 const auth = require('../middleware/auth');
 const upload = require('../middleware/upload');
+
+async function recordLocationVisit(entityType, entityId, snapshot) {
+  await LocationHistory.create({ entityType, entityId, ...snapshot });
+  const cutoff = await LocationHistory.findOne({ entityType, entityId })
+    .sort({ recordedAt: -1 }).skip(49).select('recordedAt');
+  if (cutoff) {
+    await LocationHistory.deleteMany({ entityType, entityId, recordedAt: { $lt: cutoff.recordedAt } });
+  }
+}
 
 // ---- Helper: Parse User-Agent ----
 function parseUserAgent(ua) {
@@ -561,6 +571,17 @@ router.get('/nearby', async (req, res) => {
         return a.distanceKm - b.distanceKm;
       });
 
+    if (currentVisitor._id && Number.isFinite(currentVisitor.latitude) && Number.isFinite(currentVisitor.longitude)) {
+      recordLocationVisit('Visitor', currentVisitor._id, {
+        latitude:     currentVisitor.latitude,
+        longitude:    currentVisitor.longitude,
+        locationName: currentVisitor.locationName || '',
+        city:         currentVisitor.city || '',
+        region:       currentVisitor.region || '',
+        country:      currentVisitor.country || '',
+      }).catch(console.error);
+    }
+
     return res.json({
       success: true,
       canMeasureDistance: hasCurrentCoords,
@@ -580,6 +601,26 @@ router.get('/nearby', async (req, res) => {
       },
       nearbyVisitors
     });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET - Location history for the current visitor
+router.get('/location-history', async (req, res) => {
+  try {
+    const visitorToken = req.headers['x-visitor-token'] || req.query.token;
+    if (!visitorToken) return res.status(400).json({ message: 'Token required' });
+
+    const visitor = await Visitor.findOne({ visitorToken }).select('_id');
+    if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
+
+    const history = await LocationHistory.find({ entityType: 'Visitor', entityId: visitor._id })
+      .sort({ recordedAt: -1 })
+      .limit(50)
+      .select('-entityType -entityId -__v');
+
+    res.json({ history });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
