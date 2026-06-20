@@ -30,6 +30,19 @@ function parseUserAgent(ua) {
   return { browser, browserVersion, os, osVersion, device };
 }
 
+function haversineDistanceKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
 // POST - Track visitor (token-based, public)
 router.post('/track', async (req, res) => {
   try {
@@ -469,6 +482,77 @@ router.get('/me', async (req, res) => {
       city: visitor.city || '',
       region: visitor.region || '',
       isRegistered: visitor.isRegistered
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET - Nearby visitors using saved visitor profile name and current location name
+router.get('/nearby', async (req, res) => {
+  try {
+    const visitorToken = req.headers['x-visitor-token'] || req.query.token;
+    if (!visitorToken) return res.status(400).json({ message: 'Token required' });
+
+    const radiusKm = Math.max(1, Math.min(50, Number(req.query.radiusKm) || 10));
+    const activeSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
+
+    const currentVisitor = await Visitor.findOne({ visitorToken })
+      .select('visitorName registeredName latitude longitude locationName locationUpdatedAt');
+    if (!currentVisitor) return res.status(404).json({ message: 'Visitor not found' });
+
+    const others = await Visitor.find({
+      visitorToken: { $ne: visitorToken },
+      latitude: { $ne: null },
+      longitude: { $ne: null },
+      locationUpdatedAt: { $gte: activeSince },
+      locationDenied: { $ne: true }
+    })
+      .select('visitorName registeredName registeredProfession registeredArea latitude longitude locationName locationUpdatedAt')
+      .sort({ locationUpdatedAt: -1 })
+      .limit(100);
+
+    const hasCurrentCoords = Number.isFinite(currentVisitor.latitude) && Number.isFinite(currentVisitor.longitude);
+
+    const nearbyVisitors = others
+      .map((visitor) => {
+        const distanceKm = hasCurrentCoords
+          ? haversineDistanceKm(
+              currentVisitor.latitude,
+              currentVisitor.longitude,
+              visitor.latitude,
+              visitor.longitude
+            )
+          : null;
+        if (distanceKm != null && distanceKm > radiusKm) return null;
+
+        const displayName = (visitor.registeredName || visitor.visitorName || 'Hadlay user').trim();
+        return {
+          name: displayName,
+          profession: visitor.registeredProfession || '',
+          area: visitor.registeredArea || '',
+          locationName: visitor.locationName || visitor.registeredArea || 'स्थान उपलब्ध नहीं',
+          distanceKm: distanceKm != null ? Number(distanceKm.toFixed(1)) : null,
+          distanceLabel: distanceKm == null ? '' : (distanceKm < 1 ? '< 1 km' : `${distanceKm.toFixed(1)} km`),
+          updatedAt: visitor.locationUpdatedAt
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => {
+        if (a.distanceKm == null && b.distanceKm == null) return 0;
+        if (a.distanceKm == null) return 1;
+        if (b.distanceKm == null) return -1;
+        return a.distanceKm - b.distanceKm;
+      });
+
+    return res.json({
+      success: true,
+      canMeasureDistance: hasCurrentCoords,
+      currentVisitor: {
+        name: (currentVisitor.registeredName || currentVisitor.visitorName || '').trim(),
+        locationName: currentVisitor.locationName || ''
+      },
+      nearbyVisitors
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
