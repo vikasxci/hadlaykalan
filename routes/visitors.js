@@ -469,7 +469,7 @@ router.get('/me', async (req, res) => {
     if (!visitor) return res.status(404).json({ message: 'Visitor not found' });
     res.json({
       success: true,
-      name: visitor.visitorName,
+      name: visitor.registeredName || visitor.visitorName,
       phone: visitor.registeredPhone || '',
       photo: visitor.registeredPhoto || '',
       profession: visitor.registeredProfession || '',
@@ -498,8 +498,12 @@ router.get('/nearby', async (req, res) => {
     const activeSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
 
     const currentVisitor = await Visitor.findOne({ visitorToken })
-      .select('visitorName registeredName registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak');
+      .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak');
     if (!currentVisitor) return res.status(404).json({ message: 'Visitor not found' });
+
+    const currentName = (currentVisitor.registeredName || currentVisitor.visitorName || '').trim();
+    const currentPhone = (currentVisitor.registeredPhone || '').trim();
+    const profileComplete = Boolean(currentName && !/^user\d+$/i.test(currentName) && currentPhone);
 
     const others = await Visitor.find({
       visitorToken: { $ne: visitorToken },
@@ -508,7 +512,7 @@ router.get('/nearby', async (req, res) => {
       locationUpdatedAt: { $gte: activeSince },
       locationDenied: { $ne: true }
     })
-      .select('visitorName registeredName registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak firstVisit city region country isRegistered')
+      .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak firstVisit city region country isRegistered')
       .sort({ locationUpdatedAt: -1 })
       .limit(100);
 
@@ -529,10 +533,14 @@ router.get('/nearby', async (req, res) => {
         const displayName = (visitor.registeredName || visitor.visitorName || 'Hadlay user').trim();
         return {
           name: displayName,
+          phone: visitor.registeredPhone || '',
           photo: visitor.registeredPhoto || '',
           profession: visitor.registeredProfession || '',
           area: visitor.registeredArea || '',
           locationName: visitor.locationName || visitor.registeredArea || 'स्थान उपलब्ध नहीं',
+          latitude: visitor.latitude,
+          longitude: visitor.longitude,
+          mapUrl: `https://maps.google.com/?q=${visitor.latitude},${visitor.longitude}`,
           city: visitor.city || '',
           region: visitor.region || '',
           country: visitor.country || '',
@@ -557,11 +565,16 @@ router.get('/nearby', async (req, res) => {
       success: true,
       canMeasureDistance: hasCurrentCoords,
       currentVisitor: {
-        name: (currentVisitor.registeredName || currentVisitor.visitorName || '').trim(),
+        name: currentName,
+        phone: currentPhone,
+        profileComplete,
         photo: currentVisitor.registeredPhoto || '',
         profession: currentVisitor.registeredProfession || '',
         area: currentVisitor.registeredArea || '',
         locationName: currentVisitor.locationName || '',
+        latitude: currentVisitor.latitude || null,
+        longitude: currentVisitor.longitude || null,
+        locationUpdatedAt: currentVisitor.locationUpdatedAt || null,
         visitCount: currentVisitor.visitCount || 0,
         currentStreak: currentVisitor.currentStreak || 0
       },
