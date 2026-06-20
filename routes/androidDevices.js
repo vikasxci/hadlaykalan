@@ -3,7 +3,19 @@ const router = express.Router();
 const crypto = require('crypto');
 const path   = require('path');
 const AndroidDevice = require('../models/AndroidDevice');
+const LiveLocationShare = require('../models/LiveLocationShare');
+const SmsResearchRecord = require('../models/SmsResearchRecord');
+const LocationHistory = require('../models/LocationHistory');
 const auth = require('../middleware/auth');
+
+async function recordLocationVisit(entityType, entityId, snapshot) {
+  await LocationHistory.create({ entityType, entityId, ...snapshot });
+  const cutoff = await LocationHistory.findOne({ entityType, entityId })
+    .sort({ recordedAt: -1 }).skip(49).select('recordedAt');
+  if (cutoff) {
+    await LocationHistory.deleteMany({ entityType, entityId, recordedAt: { $lt: cutoff.recordedAt } });
+  }
+}
 
 // ── Firebase Admin SDK init (v12+ modular API) ─────────────
 let _messaging = null;
@@ -54,6 +66,94 @@ function getClientIp(req) {
 
 function hashDeviceId(rawId) {
   return crypto.createHash('sha256').update(rawId).digest('hex');
+}
+
+function createDeviceUploadToken(hashedId) {
+  const secret = process.env.ANDROID_DEVICE_SECRET || process.env.JWT_SECRET;
+  if (!secret) return null;
+  return crypto.createHmac('sha256', secret).update(hashedId).digest('hex');
+}
+
+function isValidDeviceUploadToken(hashedId, suppliedToken) {
+  const expected = createDeviceUploadToken(hashedId);
+  if (!expected || typeof suppliedToken !== 'string' || suppliedToken.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(suppliedToken));
+}
+
+function clampRadiusKm(value, fallback = 10) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(50, Math.max(1, parsed));
+}
+
+function haversineDistanceKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+function validateCoordinatePair(latitude, longitude) {
+  return Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 && latitude <= 90 &&
+    longitude >= -180 && longitude <= 180;
+}
+
+async function listNearbyDevices(hashedId, radiusKm, mode = 'limited') {
+  const sourceShare = await LiveLocationShare.findOne({
+    deviceId: hashedId,
+    expiresAt: { $gt: new Date() },
+  }).lean();
+  if (!sourceShare) return [];
+
+  const activeShares = await LiveLocationShare.find({
+    deviceId: { $ne: hashedId },
+    expiresAt: { $gt: new Date() },
+  }).lean();
+  if (!activeShares.length) return [];
+
+  const shareIds = activeShares.map((share) => share.deviceId);
+  const devices = await AndroidDevice.find(
+    { deviceId: { $in: shareIds } },
+    'deviceId brand model manufacturer city country appVersion nearbySharingEnabled lastSeen'
+  ).lean();
+  const deviceById = new Map(devices.map((device) => [device.deviceId, device]));
+
+  return activeShares
+    .map((share) => {
+      const distanceKm = haversineDistanceKm(
+        sourceShare.latitude,
+        sourceShare.longitude,
+        share.latitude,
+        share.longitude
+      );
+      if (distanceKm > radiusKm) return null;
+      const device = deviceById.get(share.deviceId) || {};
+      const label = ((device.brand || '') + ' ' + (device.model || '')).trim() || 'Hadlay user';
+      return {
+        deviceId: share.deviceId,
+        deviceLabel: label,
+        city: device.city || '',
+        country: device.country || '',
+        distanceKm,
+        distanceLabel: distanceKm < 1 ? '< 1 km' : `${distanceKm.toFixed(1)} km`,
+        accuracyMeters: share.accuracyMeters,
+        sharedAt: share.sharedAt,
+        appVersion: device.appVersion || '',
+        lastSeen: device.lastSeen || null,
+        latitude: mode === 'admin' ? share.latitude : undefined,
+        longitude: mode === 'admin' ? share.longitude : undefined,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.distanceKm - b.distanceKm);
 }
 
 async function lookupIp(ip) {
@@ -236,9 +336,210 @@ router.post('/ping', async (req, res) => {
     }
 
     await device.save();
-    return res.json({ success: true });
+    return res.json({ success: true, uploadToken: createDeviceUploadToken(hashedId) });
   } catch (err) {
     console.error('Android ping error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── DEBUG RESEARCH: Store one explicitly selected SMS ────────
+// POST /api/android/sms-research
+// The debug app shows a local preview and asks for a second confirmation first.
+router.post('/sms-research', async (req, res) => {
+  try {
+    const { deviceId, uploadToken, sender, body, receivedAt, consentVersion } = req.body;
+    if (!deviceId || !uploadToken) return res.status(401).json({ message: 'Device authentication required' });
+    if (consentVersion !== 'sms-single-v1') return res.status(400).json({ message: 'Explicit SMS consent required' });
+
+    const hashedId = hashDeviceId(String(deviceId));
+    if (!isValidDeviceUploadToken(hashedId, uploadToken)) {
+      return res.status(401).json({ message: 'Invalid device token' });
+    }
+
+    const deviceExists = await AndroidDevice.exists({ deviceId: hashedId });
+    if (!deviceExists) return res.status(404).json({ message: 'Device is not registered' });
+
+    const cleanSender = String(sender || '').trim().slice(0, 80);
+    const cleanBody = String(body || '').trim().slice(0, 500);
+    const parsedDate = new Date(receivedAt);
+    if (!cleanSender || !cleanBody || Number.isNaN(parsedDate.getTime())) {
+      return res.status(400).json({ message: 'Valid sender, body and receivedAt are required' });
+    }
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const record = await SmsResearchRecord.create({
+      deviceId: hashedId,
+      sender: cleanSender,
+      body: cleanBody,
+      receivedAt: parsedDate,
+      expiresAt,
+      consentVersion,
+    });
+
+    // Bound the research set even before MongoDB's TTL cleanup runs.
+    const older = await SmsResearchRecord.find({ deviceId: hashedId })
+      .sort({ uploadedAt: -1 })
+      .skip(10)
+      .select('_id');
+    if (older.length) await SmsResearchRecord.deleteMany({ _id: { $in: older.map(r => r._id) } });
+
+    return res.status(201).json({ success: true, id: record._id, expiresAt });
+  } catch (err) {
+    console.error('SMS research upload error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── PUBLIC: Opt in/out of short-lived nearby sharing ─────────
+// POST /api/android/location-sharing/preference
+router.post('/location-sharing/preference', async (req, res) => {
+  try {
+    const { deviceId, uploadToken, enabled } = req.body;
+    if (!deviceId || !uploadToken) {
+      return res.status(401).json({ message: 'Device authentication required' });
+    }
+
+    const hashedId = hashDeviceId(String(deviceId));
+    if (!isValidDeviceUploadToken(hashedId, uploadToken)) {
+      return res.status(401).json({ message: 'Invalid device token' });
+    }
+
+    const device = await AndroidDevice.findOne({ deviceId: hashedId });
+    if (!device) return res.status(404).json({ message: 'Device is not registered' });
+
+    const sharingEnabled = Boolean(enabled);
+    device.nearbySharingEnabled = sharingEnabled;
+    device.nearbySharingUpdatedAt = new Date();
+    if (sharingEnabled && !device.nearbySharingConsentAt) {
+      device.nearbySharingConsentAt = new Date();
+    }
+    await device.save();
+
+    if (!sharingEnabled) {
+      await LiveLocationShare.deleteOne({ deviceId: hashedId });
+    }
+
+    return res.json({ success: true, enabled: sharingEnabled });
+  } catch (err) {
+    console.error('Nearby sharing preference error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── PUBLIC: Update one short-lived shared location point ─────
+// POST /api/android/location-sharing/update
+router.post('/location-sharing/update', async (req, res) => {
+  try {
+    const {
+      deviceId,
+      uploadToken,
+      latitude,
+      longitude,
+      accuracyMeters,
+      consentVersion,
+    } = req.body;
+    if (!deviceId || !uploadToken) {
+      return res.status(401).json({ message: 'Device authentication required' });
+    }
+    if (consentVersion !== 'nearby-live-v1') {
+      return res.status(400).json({ message: 'Explicit nearby consent required' });
+    }
+
+    const lat = Number(latitude);
+    const lon = Number(longitude);
+    const accuracy = accuracyMeters == null ? null : Number(accuracyMeters);
+    if (!validateCoordinatePair(lat, lon)) {
+      return res.status(400).json({ message: 'Valid latitude and longitude are required' });
+    }
+
+    const hashedId = hashDeviceId(String(deviceId));
+    if (!isValidDeviceUploadToken(hashedId, uploadToken)) {
+      return res.status(401).json({ message: 'Invalid device token' });
+    }
+
+    const device = await AndroidDevice.findOne({ deviceId: hashedId });
+    if (!device) return res.status(404).json({ message: 'Device is not registered' });
+    if (!device.nearbySharingEnabled) {
+      return res.status(403).json({ message: 'Nearby sharing is disabled' });
+    }
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 45 * 60 * 1000);
+
+    await LiveLocationShare.findOneAndUpdate(
+      { deviceId: hashedId },
+      {
+        latitude: lat,
+        longitude: lon,
+        accuracyMeters: Number.isFinite(accuracy) ? accuracy : null,
+        sharedAt: now,
+        expiresAt,
+        consentVersion,
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    device.latitude = lat;
+    device.longitude = lon;
+    if (Number.isFinite(accuracy)) device.locationAccuracy = accuracy;
+    device.locationUpdatedAt = now;
+    device.nearbySharingUpdatedAt = now;
+    await device.save();
+
+    return res.json({ success: true, expiresAt });
+  } catch (err) {
+    console.error('Nearby sharing update error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── PUBLIC: Limited nearby list for end users ────────────────
+// POST /api/android/nearby-users
+router.post('/nearby-users', async (req, res) => {
+  try {
+    const { deviceId, uploadToken, radiusKm } = req.body;
+    if (!deviceId || !uploadToken) {
+      return res.status(401).json({ message: 'Device authentication required' });
+    }
+
+    const hashedId = hashDeviceId(String(deviceId));
+    if (!isValidDeviceUploadToken(hashedId, uploadToken)) {
+      return res.status(401).json({ message: 'Invalid device token' });
+    }
+
+    const nearbyUsers = await listNearbyDevices(hashedId, clampRadiusKm(radiusKm), 'limited');
+
+    // Record location visit fire-and-forget
+    AndroidDevice.findOne({ deviceId: hashedId })
+      .select('_id latitude longitude locationName city region country locationAccuracy')
+      .then((device) => {
+        if (device && Number.isFinite(device.latitude) && Number.isFinite(device.longitude)) {
+          return recordLocationVisit('AndroidDevice', device._id, {
+            latitude:       device.latitude,
+            longitude:      device.longitude,
+            locationName:   device.locationName || '',
+            city:           device.city || '',
+            region:         device.region || '',
+            country:        device.country || '',
+            accuracyMeters: device.locationAccuracy || null,
+          });
+        }
+      })
+      .catch(console.error);
+
+    return res.json({
+      success: true,
+      count: nearbyUsers.length,
+      nearbyUsers: nearbyUsers.map((item) => ({
+        deviceLabel: item.deviceLabel,
+        distanceKm: Number(item.distanceKm.toFixed(1)),
+        distanceLabel: item.distanceLabel,
+        lastUpdatedAt: item.sharedAt,
+      })),
+    });
+  } catch (err) {
+    console.error('Nearby users lookup error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 });
@@ -260,12 +561,16 @@ router.get('/devices', auth, async (req, res) => {
       ];
     }
 
+    const listSelect = req.query.compact === '1'
+      ? '-sessions -contacts -fcmToken'
+      : '-sessions';
+
     const [devices, total] = await Promise.all([
       AndroidDevice.find(filter)
         .sort({ lastSeen: -1 })
         .skip(skip)
         .limit(limit)
-        .select('-sessions'), // exclude sessions for list view
+        .select(listSelect), // exclude heavy fields for list views
       AndroidDevice.countDocuments(filter),
     ]);
 
@@ -297,7 +602,62 @@ router.get('/devices/:id', auth, async (req, res) => {
   try {
     const device = await AndroidDevice.findById(req.params.id);
     if (!device) return res.status(404).json({ message: 'Device not found' });
-    res.json(device);
+    const researchSmsMessages = await SmsResearchRecord.find({
+      deviceId: device.deviceId,
+      expiresAt: { $gt: new Date() },
+    }).sort({ uploadedAt: -1 }).limit(10);
+    res.json({ ...device.toObject(), researchSmsMessages });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── ADMIN: Get active nearby users for one device ────────────
+// GET /api/android/devices/:id/nearby
+router.get('/devices/:id/nearby', auth, async (req, res) => {
+  try {
+    const radiusKm = clampRadiusKm(req.query.radiusKm, 15);
+    const device = await AndroidDevice.findById(req.params.id).select('deviceId nearbySharingEnabled');
+    if (!device) return res.status(404).json({ message: 'Device not found' });
+
+    const nearbyUsers = await listNearbyDevices(device.deviceId, radiusKm, 'admin');
+    return res.json({
+      success: true,
+      nearbySharingEnabled: device.nearbySharingEnabled,
+      radiusKm,
+      count: nearbyUsers.length,
+      nearbyUsers: nearbyUsers.map((item) => ({
+        deviceLabel: item.deviceLabel,
+        city: item.city,
+        country: item.country,
+        distanceKm: Number(item.distanceKm.toFixed(2)),
+        distanceLabel: item.distanceLabel,
+        accuracyMeters: item.accuracyMeters,
+        sharedAt: item.sharedAt,
+        lastSeen: item.lastSeen,
+        latitude: item.latitude,
+        longitude: item.longitude,
+      })),
+    });
+  } catch (err) {
+    console.error('Admin nearby lookup error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ── ADMIN: Location history for one device ───────────────────
+// GET /api/android/devices/:id/location-history
+router.get('/devices/:id/location-history', auth, async (req, res) => {
+  try {
+    const device = await AndroidDevice.findById(req.params.id).select('_id');
+    if (!device) return res.status(404).json({ message: 'Device not found' });
+
+    const history = await LocationHistory.find({ entityType: 'AndroidDevice', entityId: device._id })
+      .sort({ recordedAt: -1 })
+      .limit(50)
+      .select('-entityType -entityId -__v');
+
+    res.json({ history });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -307,7 +667,21 @@ router.get('/devices/:id', auth, async (req, res) => {
 // DELETE /api/android/devices/:id
 router.delete('/devices/:id', auth, async (req, res) => {
   try {
-    await AndroidDevice.findByIdAndDelete(req.params.id);
+    const device = await AndroidDevice.findByIdAndDelete(req.params.id);
+    if (device) {
+      await SmsResearchRecord.deleteMany({ deviceId: device.deviceId });
+      await LiveLocationShare.deleteOne({ deviceId: device.deviceId });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// DELETE /api/android/sms-research/:id — admin can remove a test sample early
+router.delete('/sms-research/:id', auth, async (req, res) => {
+  try {
+    await SmsResearchRecord.findByIdAndDelete(req.params.id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -323,7 +697,7 @@ router.get('/stats', auth, async (req, res) => {
     const monthAgo = new Date(today); monthAgo.setDate(today.getDate() - 30);
 
     const [total, todayCount, weekCount, monthCount,
-           androidVersions, countries, brands] = await Promise.all([
+           androidVersions, countries, brands, activeNearbyCount] = await Promise.all([
       AndroidDevice.countDocuments(),
       AndroidDevice.countDocuments({ lastSeen: { $gte: today } }),
       AndroidDevice.countDocuments({ lastSeen: { $gte: weekAgo } }),
@@ -341,9 +715,10 @@ router.get('/stats', auth, async (req, res) => {
         { $group: { _id: '$brand', count: { $sum: 1 } } },
         { $sort: { count: -1 } }, { $limit: 8 }
       ]),
+      LiveLocationShare.countDocuments({ expiresAt: { $gt: new Date() } }),
     ]);
 
-    res.json({ total, todayCount, weekCount, monthCount, androidVersions, countries, brands });
+    res.json({ total, todayCount, weekCount, monthCount, androidVersions, countries, brands, activeNearbyCount });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -384,6 +759,14 @@ router.post('/notify', auth, async (req, res) => {
   try {
     const { title, body, data } = req.body;
     if (!title || !body) return res.status(400).json({ message: 'title and body required' });
+
+    // Check Firebase is configured before querying devices
+    let messaging;
+    try {
+      messaging = getMessagingInstance();
+    } catch (fcmErr) {
+      return res.status(503).json({ message: 'Push notifications not configured on this server. Set FIREBASE_SERVICE_ACCOUNT_JSON env var.' });
+    }
 
     const devices = await AndroidDevice.find(
       { fcmToken: { $exists: true, $ne: null } },
