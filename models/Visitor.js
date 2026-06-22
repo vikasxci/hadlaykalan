@@ -42,6 +42,7 @@ const visitorSchema = new mongoose.Schema({
   locationAccuracy: { type: Number },
   locationUpdatedAt: { type: Date },
   locationDenied: { type: Boolean, default: false },
+  nearbySharingEnabled: { type: Boolean, default: false },
   visitCount: { type: Number, default: 1 },
   totalTimeOnSite: { type: Number, default: 0 }, // ms
   lastVisit: { type: Date, default: Date.now },
