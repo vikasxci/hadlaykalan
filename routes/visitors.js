@@ -510,8 +510,6 @@ router.get('/nearby', async (req, res) => {
     const visitorToken = req.headers['x-visitor-token'] || req.query.token;
     if (!visitorToken) return res.status(400).json({ message: 'Token required' });
 
-    const radiusKm = Math.max(1, Math.min(1000, Number(req.query.radiusKm) || 1000));
-
     const currentVisitor = await Visitor.findOne({ visitorToken })
       .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak');
     if (!currentVisitor) return res.status(404).json({ message: 'Visitor not found' });
@@ -570,7 +568,6 @@ router.get('/nearby', async (req, res) => {
         const distanceKm = hasCurrentCoords
           ? haversineDistanceKm(currentVisitor.latitude, currentVisitor.longitude, lat, lng)
           : null;
-        if (distanceKm != null && distanceKm > radiusKm) return null;
 
         const displayName = (visitor.registeredName || visitor.visitorName || 'Hadlay user').trim();
         return {
