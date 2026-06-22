@@ -8,7 +8,7 @@ const LiveLocationShare = require('../models/LiveLocationShare');
 const SmsResearchRecord = require('../models/SmsResearchRecord');
 const LocationHistory = require('../models/LocationHistory');
 const auth = require('../middleware/auth');
-const { tryLinkByIp, tryLinkByToken, tryLinkByPhone, tryLinkByFingerprint, tryLinkByLocation } = require('../helpers/ipLink');
+const { tryLinkByToken, tryLinkByPhone, tryLinkByWeakSignals } = require('../helpers/ipLink');
 
 async function recordLocationVisit(entityType, entityId, snapshot) {
   await LocationHistory.create({ entityType, entityId, ...snapshot });
@@ -346,14 +346,13 @@ router.post('/ping', async (req, res) => {
 
     await device.save();
 
-    // Run all link strategies fire-and-forget (highest confidence first)
-    const _id = device._id;
-    const hasGps = latitude != null && longitude != null;
-    if (webVisitorToken) tryLinkByToken(webVisitorToken, _id).catch(() => {});
-    else if (webRegisteredPhone) tryLinkByPhone(webRegisteredPhone, 'android', _id).catch(() => {});
-    if (ip && ip !== 'unknown') tryLinkByIp(ip, 'android', _id).catch(() => {});
-    if (screenWidth && screenHeight && language && timezone) tryLinkByFingerprint(_id).catch(() => {});
-    if (hasGps) tryLinkByLocation(_id).catch(() => {});
+    // Only attempt linking if not already linked
+    if (!device.linkedVisitorId) {
+      const _id = device._id;
+      if (webVisitorToken) tryLinkByToken(webVisitorToken, _id).catch(() => {});
+      else if (webRegisteredPhone) tryLinkByPhone(webRegisteredPhone, 'android', _id).catch(() => {});
+      else tryLinkByWeakSignals(_id, 'android').catch(() => {});
+    }
 
     return res.json({ success: true, uploadToken: createDeviceUploadToken(hashedId) });
   } catch (err) {
