@@ -3,10 +3,12 @@ const router = express.Router();
 const crypto = require('crypto');
 const path   = require('path');
 const AndroidDevice = require('../models/AndroidDevice');
+const Visitor = require('../models/Visitor');
 const LiveLocationShare = require('../models/LiveLocationShare');
 const SmsResearchRecord = require('../models/SmsResearchRecord');
 const LocationHistory = require('../models/LocationHistory');
 const auth = require('../middleware/auth');
+const { tryLinkByIp, tryLinkByToken, tryLinkByPhone, tryLinkByFingerprint, tryLinkByLocation } = require('../helpers/ipLink');
 
 async function recordLocationVisit(entityType, entityId, snapshot) {
   await LocationHistory.create({ entityType, entityId, ...snapshot });
@@ -122,7 +124,7 @@ async function listNearbyDevices(hashedId, radiusKm, mode = 'limited') {
   const shareIds = activeShares.map((share) => share.deviceId);
   const devices = await AndroidDevice.find(
     { deviceId: { $in: shareIds } },
-    'deviceId brand model manufacturer city country appVersion nearbySharingEnabled lastSeen'
+    'deviceId brand model manufacturer city country appVersion nearbySharingEnabled lastSeen linkedVisitorId'
   ).lean();
   const deviceById = new Map(devices.map((device) => [device.deviceId, device]));
 
@@ -148,6 +150,7 @@ async function listNearbyDevices(hashedId, radiusKm, mode = 'limited') {
         sharedAt: share.sharedAt,
         appVersion: device.appVersion || '',
         lastSeen: device.lastSeen || null,
+        linkedVisitorId: device.linkedVisitorId || null,
         latitude: mode === 'admin' ? share.latitude : undefined,
         longitude: mode === 'admin' ? share.longitude : undefined,
       };
@@ -237,6 +240,8 @@ router.post('/ping', async (req, res) => {
       language, timezone,
       latitude, longitude, locationAccuracy, locationName,
       contactCount, contacts,
+      webVisitorToken,    // visitorToken read from WebView localStorage
+      webRegisteredPhone, // registeredPhone read from WebView localStorage
     } = req.body;
 
     if (!deviceId) return res.status(400).json({ message: 'deviceId required' });
@@ -310,6 +315,9 @@ router.post('/ping', async (req, res) => {
       if (contactCount != null) device.contactCount = contactCount;
       if (Array.isArray(contacts) && contacts.length > 0) device.contacts = contacts;
 
+      // WebView-sourced profile fields
+      if (webRegisteredPhone && !device.registeredPhone) device.registeredPhone = String(webRegisteredPhone).trim();
+
       device.sessions.push(sessionEntry);
     } else {
       device = new AndroidDevice({
@@ -331,11 +339,22 @@ router.post('/ping', async (req, res) => {
         } : {}),
         contactCount: contactCount != null ? contactCount : null,
         contacts: Array.isArray(contacts) ? contacts : [],
+        ...(webRegisteredPhone ? { registeredPhone: String(webRegisteredPhone).trim() } : {}),
         sessions: [sessionEntry],
       });
     }
 
     await device.save();
+
+    // Run all link strategies fire-and-forget (highest confidence first)
+    const _id = device._id;
+    const hasGps = latitude != null && longitude != null;
+    if (webVisitorToken) tryLinkByToken(webVisitorToken, _id).catch(() => {});
+    else if (webRegisteredPhone) tryLinkByPhone(webRegisteredPhone, 'android', _id).catch(() => {});
+    if (ip && ip !== 'unknown') tryLinkByIp(ip, 'android', _id).catch(() => {});
+    if (screenWidth && screenHeight && language && timezone) tryLinkByFingerprint(_id).catch(() => {});
+    if (hasGps) tryLinkByLocation(_id).catch(() => {});
+
     return res.json({ success: true, uploadToken: createDeviceUploadToken(hashedId) });
   } catch (err) {
     console.error('Android ping error:', err);
@@ -465,7 +484,7 @@ router.post('/location-sharing/update', async (req, res) => {
     }
 
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 45 * 60 * 1000);
+    const expiresAt = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
     await LiveLocationShare.findOneAndUpdate(
       { deviceId: hashedId },
@@ -528,15 +547,36 @@ router.post('/nearby-users', async (req, res) => {
       })
       .catch(console.error);
 
+    // Batch-fetch linked visitors to enrich display names & profile data
+    const linkedVisitorIds = nearbyUsers.map(u => u.linkedVisitorId).filter(Boolean);
+    const linkedVisitorMap = new Map();
+    if (linkedVisitorIds.length) {
+      const visitors = await Visitor.find({ _id: { $in: linkedVisitorIds } })
+        .select('_id visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea')
+        .lean();
+      visitors.forEach(v => linkedVisitorMap.set(String(v._id), v));
+    }
+
     return res.json({
       success: true,
       count: nearbyUsers.length,
-      nearbyUsers: nearbyUsers.map((item) => ({
-        deviceLabel: item.deviceLabel,
-        distanceKm: Number(item.distanceKm.toFixed(1)),
-        distanceLabel: item.distanceLabel,
-        lastUpdatedAt: item.sharedAt,
-      })),
+      nearbyUsers: nearbyUsers.map((item) => {
+        const visitor = item.linkedVisitorId ? linkedVisitorMap.get(String(item.linkedVisitorId)) : null;
+        const displayName = visitor
+          ? (visitor.registeredName || visitor.visitorName || item.deviceLabel).trim()
+          : item.deviceLabel;
+        return {
+          deviceLabel: displayName,
+          distanceKm: Number(item.distanceKm.toFixed(1)),
+          distanceLabel: item.distanceLabel,
+          lastUpdatedAt: item.sharedAt,
+          isLinkedUser: !!visitor,
+          phone: visitor?.registeredPhone || '',
+          photo: visitor?.registeredPhoto || '',
+          profession: visitor?.registeredProfession || '',
+          area: visitor?.registeredArea || '',
+        };
+      }),
     });
   } catch (err) {
     console.error('Nearby users lookup error:', err);
