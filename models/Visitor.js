@@ -62,7 +62,9 @@ const visitorSchema = new mongoose.Schema({
   registeredArea: { type: String },
   registeredAt: { type: Date },
   otpCode: { type: String },
-  otpExpiry: { type: Date }
+  otpExpiry: { type: Date },
+  // Linked Android app device (matched by shared IP)
+  linkedAndroidDeviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'AndroidDevice', default: null }
 }, { timestamps: true });
 
 module.exports = mongoose.models.Visitor || mongoose.model('Visitor', visitorSchema);
