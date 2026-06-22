@@ -2,9 +2,11 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const Visitor = require('../models/Visitor');
+const AndroidDevice = require('../models/AndroidDevice');
 const LocationHistory = require('../models/LocationHistory');
 const auth = require('../middleware/auth');
 const upload = require('../middleware/upload');
+const { tryLinkByIp, tryLinkByPhone, tryLinkByFingerprint, tryLinkByLocation } = require('../helpers/ipLink');
 
 async function recordLocationVisit(entityType, entityId, snapshot) {
   await LocationHistory.create({ entityType, entityId, ...snapshot });
@@ -135,11 +137,16 @@ router.post('/track', async (req, res) => {
       }
 
       await visitor.save();
+      // Run all link strategies fire-and-forget
+      if (ip && ip !== 'unknown') tryLinkByIp(ip, 'visitor', visitor._id).catch(() => {});
+      if (visitor.registeredPhone) tryLinkByPhone(visitor.registeredPhone, 'visitor', visitor._id).catch(() => {});
+      if (visitor.screenWidth && visitor.screenHeight && visitor.language && visitor.timezone) tryLinkByFingerprint(visitor._id, 'visitor').catch(() => {});
+      if (visitor.latitude && visitor.longitude) tryLinkByLocation(visitor._id, 'visitor').catch(() => {});
 
       const totalVisitors = await Visitor.countDocuments();
-      return res.json({ 
-        success: true, 
-        totalVisitors, 
+      return res.json({
+        success: true,
+        totalVisitors,
         visitorToken: visitor.visitorToken,
         visitorName: visitor.visitorName,
         visitCount: visitor.visitCount,
@@ -209,6 +216,8 @@ router.post('/track', async (req, res) => {
       console.log('Creating visitor in DB...');
       const newVisitor = await Visitor.create(visitorData);
       console.log('✓ Visitor created successfully:', newVisitor._id);
+      if (ip && ip !== 'unknown') tryLinkByIp(ip, 'visitor', newVisitor._id).catch(() => {});
+      // screenWidth/height etc not yet known on first visit, phone/fingerprint/location will run on next ping
       
       const totalVisitors = await Visitor.countDocuments();
       
@@ -504,8 +513,7 @@ router.get('/nearby', async (req, res) => {
     const visitorToken = req.headers['x-visitor-token'] || req.query.token;
     if (!visitorToken) return res.status(400).json({ message: 'Token required' });
 
-    const radiusKm = Math.max(1, Math.min(50, Number(req.query.radiusKm) || 10));
-    const activeSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const radiusKm = Math.max(1, Math.min(1000, Number(req.query.radiusKm) || 1000));
 
     const currentVisitor = await Visitor.findOne({ visitorToken })
       .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak');
@@ -515,28 +523,55 @@ router.get('/nearby', async (req, res) => {
     const currentPhone = (currentVisitor.registeredPhone || '').trim();
     const profileComplete = Boolean(currentName && !/^user\d+$/i.test(currentName) && currentPhone);
 
+    // No time expiry — show everyone who has shared location at least once, until they explicitly deny
     const others = await Visitor.find({
       visitorToken: { $ne: visitorToken },
-      latitude: { $ne: null },
-      longitude: { $ne: null },
-      locationUpdatedAt: { $gte: activeSince },
+      latitude: { $exists: true, $ne: null },
+      longitude: { $exists: true, $ne: null },
       locationDenied: { $ne: true }
     })
-      .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak firstVisit city region country isRegistered')
+      .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak firstVisit city region country isRegistered linkedAndroidDeviceId')
       .sort({ locationUpdatedAt: -1 })
-      .limit(100);
+      .limit(200);
+
+    // Batch-fetch linked android devices to use more recent location & profile
+    const linkedDeviceIds = others.map(v => v.linkedAndroidDeviceId).filter(Boolean);
+    const linkedDeviceMap = new Map();
+    if (linkedDeviceIds.length) {
+      const devices = await AndroidDevice.find({ _id: { $in: linkedDeviceIds } })
+        .select('_id latitude longitude locationName locationUpdatedAt')
+        .lean();
+      devices.forEach(d => linkedDeviceMap.set(String(d._id), d));
+    }
 
     const hasCurrentCoords = Number.isFinite(currentVisitor.latitude) && Number.isFinite(currentVisitor.longitude);
 
     const nearbyVisitors = others
       .map((visitor) => {
+        // Prefer android device location if it's more recent
+        let lat = visitor.latitude;
+        let lng = visitor.longitude;
+        let locationName = visitor.locationName;
+        let locationUpdatedAt = visitor.locationUpdatedAt;
+        let isLinkedUser = false;
+
+        if (visitor.linkedAndroidDeviceId) {
+          const dev = linkedDeviceMap.get(String(visitor.linkedAndroidDeviceId));
+          if (dev && Number.isFinite(dev.latitude)) {
+            const devTime = dev.locationUpdatedAt ? new Date(dev.locationUpdatedAt).getTime() : 0;
+            const visTime = visitor.locationUpdatedAt ? new Date(visitor.locationUpdatedAt).getTime() : 0;
+            if (devTime > visTime) {
+              lat = dev.latitude;
+              lng = dev.longitude;
+              locationName = dev.locationName || locationName;
+              locationUpdatedAt = dev.locationUpdatedAt;
+            }
+            isLinkedUser = true;
+          }
+        }
+
         const distanceKm = hasCurrentCoords
-          ? haversineDistanceKm(
-              currentVisitor.latitude,
-              currentVisitor.longitude,
-              visitor.latitude,
-              visitor.longitude
-            )
+          ? haversineDistanceKm(currentVisitor.latitude, currentVisitor.longitude, lat, lng)
           : null;
         if (distanceKm != null && distanceKm > radiusKm) return null;
 
@@ -547,10 +582,10 @@ router.get('/nearby', async (req, res) => {
           photo: visitor.registeredPhoto || '',
           profession: visitor.registeredProfession || '',
           area: visitor.registeredArea || '',
-          locationName: visitor.locationName || visitor.registeredArea || 'स्थान उपलब्ध नहीं',
-          latitude: visitor.latitude,
-          longitude: visitor.longitude,
-          mapUrl: `https://maps.google.com/?q=${visitor.latitude},${visitor.longitude}`,
+          locationName: locationName || visitor.registeredArea || 'स्थान उपलब्ध नहीं',
+          latitude: lat,
+          longitude: lng,
+          mapUrl: `https://maps.google.com/?q=${lat},${lng}`,
           city: visitor.city || '',
           region: visitor.region || '',
           country: visitor.country || '',
@@ -558,9 +593,10 @@ router.get('/nearby', async (req, res) => {
           currentStreak: visitor.currentStreak || 0,
           firstVisit: visitor.firstVisit || null,
           isRegistered: Boolean(visitor.isRegistered),
+          isLinkedUser,
           distanceKm: distanceKm != null ? Number(distanceKm.toFixed(1)) : null,
           distanceLabel: distanceKm == null ? '' : (distanceKm < 1 ? '< 1 km' : `${distanceKm.toFixed(1)} km`),
-          updatedAt: visitor.locationUpdatedAt
+          updatedAt: locationUpdatedAt
         };
       })
       .filter(Boolean)
