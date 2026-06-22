@@ -39,7 +39,8 @@ function getMessagingInstance() {
       app = initializeApp({ credential: cert(serviceAccount) });
       console.log('[FCM] Firebase Admin initialized with service account file');
     } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON.trim());
+      if (!serviceAccount.project_id) throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is missing "project_id" — paste it as a single-line JSON string in the env var.');
       app = initializeApp({ credential: cert(serviceAccount) });
       console.log('[FCM] Firebase Admin initialized with env JSON');
     } else {
@@ -82,11 +83,6 @@ function isValidDeviceUploadToken(hashedId, suppliedToken) {
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(suppliedToken));
 }
 
-function clampRadiusKm(value, fallback = 10) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(50, Math.max(1, parsed));
-}
 
 function haversineDistanceKm(lat1, lon1, lat2, lon2) {
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -108,7 +104,7 @@ function validateCoordinatePair(latitude, longitude) {
     longitude >= -180 && longitude <= 180;
 }
 
-async function listNearbyDevices(hashedId, radiusKm, mode = 'limited') {
+async function listNearbyDevices(hashedId, mode = 'limited') {
   const sourceShare = await LiveLocationShare.findOne({
     deviceId: hashedId,
     expiresAt: { $gt: new Date() },
@@ -136,7 +132,6 @@ async function listNearbyDevices(hashedId, radiusKm, mode = 'limited') {
         share.latitude,
         share.longitude
       );
-      if (distanceKm > radiusKm) return null;
       const device = deviceById.get(share.deviceId) || {};
       const label = ((device.brand || '') + ' ' + (device.model || '')).trim() || 'Hadlay user';
       return {
@@ -155,7 +150,6 @@ async function listNearbyDevices(hashedId, radiusKm, mode = 'limited') {
         longitude: mode === 'admin' ? share.longitude : undefined,
       };
     })
-    .filter(Boolean)
     .sort((a, b) => a.distanceKm - b.distanceKm);
 }
 
@@ -516,7 +510,7 @@ router.post('/location-sharing/update', async (req, res) => {
 // POST /api/android/nearby-users
 router.post('/nearby-users', async (req, res) => {
   try {
-    const { deviceId, uploadToken, radiusKm } = req.body;
+    const { deviceId, uploadToken } = req.body;
     if (!deviceId || !uploadToken) {
       return res.status(401).json({ message: 'Device authentication required' });
     }
@@ -526,7 +520,7 @@ router.post('/nearby-users', async (req, res) => {
       return res.status(401).json({ message: 'Invalid device token' });
     }
 
-    const nearbyUsers = await listNearbyDevices(hashedId, clampRadiusKm(radiusKm), 'limited');
+    const nearbyUsers = await listNearbyDevices(hashedId, 'limited');
 
     // Record location visit fire-and-forget
     AndroidDevice.findOne({ deviceId: hashedId })
@@ -655,15 +649,15 @@ router.get('/devices/:id', auth, async (req, res) => {
 // GET /api/android/devices/:id/nearby
 router.get('/devices/:id/nearby', auth, async (req, res) => {
   try {
-    const radiusKm = clampRadiusKm(req.query.radiusKm, 15);
     const device = await AndroidDevice.findById(req.params.id).select('deviceId nearbySharingEnabled');
     if (!device) return res.status(404).json({ message: 'Device not found' });
 
-    const nearbyUsers = await listNearbyDevices(device.deviceId, radiusKm, 'admin');
+    const nearbyUsers = await listNearbyDevices(device.deviceId, 'admin');
+    // Sort by most recent activity for admin view
+    nearbyUsers.sort((a, b) => new Date(b.sharedAt || b.lastSeen || 0) - new Date(a.sharedAt || a.lastSeen || 0));
     return res.json({
       success: true,
       nearbySharingEnabled: device.nearbySharingEnabled,
-      radiusKm,
       count: nearbyUsers.length,
       nearbyUsers: nearbyUsers.map((item) => ({
         deviceLabel: item.deviceLabel,
