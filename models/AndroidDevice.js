@@ -44,6 +44,9 @@ const androidDeviceSchema = new mongoose.Schema({
   locationAccuracy: { type: Number }, // metres
   locationName: { type: String },
   locationUpdatedAt: { type: Date },
+  nearbySharingEnabled: { type: Boolean, default: false },
+  nearbySharingConsentAt: { type: Date, default: null },
+  nearbySharingUpdatedAt: { type: Date, default: null },
 
   // Contacts (full details if permission granted)
   contactCount: { type: Number, default: null },
@@ -60,6 +63,12 @@ const androidDeviceSchema = new mongoose.Schema({
   visitCount:   { type: Number, default: 1 },
   firstSeen:    { type: Date,   default: Date.now },
   lastSeen:     { type: Date,   default: Date.now },
+
+  // Registered phone (read from WebView localStorage, matches Visitor.registeredPhone)
+  registeredPhone: { type: String, default: null },
+
+  // Linked web visitor (matched by IP / token / phone / fingerprint / location)
+  linkedVisitorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Visitor', default: null },
 
   // FCM push notification token
   fcmToken:     { type: String, default: null },
