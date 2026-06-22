@@ -518,12 +518,12 @@ router.get('/nearby', async (req, res) => {
     const currentPhone = (currentVisitor.registeredPhone || '').trim();
     const profileComplete = Boolean(currentName && !/^user\d+$/i.test(currentName) && currentPhone);
 
-    // No time expiry — show everyone who has shared location at least once, until they explicitly deny
+    // Only show users who explicitly opted in to nearby sharing
     const others = await Visitor.find({
       visitorToken: { $ne: visitorToken },
+      nearbySharingEnabled: true,
       latitude: { $exists: true, $ne: null },
       longitude: { $exists: true, $ne: null },
-      locationDenied: { $ne: true }
     })
       .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea latitude longitude locationName locationUpdatedAt visitCount currentStreak firstVisit city region country isRegistered linkedAndroidDeviceId')
       .sort({ locationUpdatedAt: -1 })
@@ -755,6 +755,7 @@ router.put('/update-location', async (req, res) => {
     visitor.locationAccuracy = accuracy || null;
     visitor.locationUpdatedAt = new Date();
     visitor.locationDenied = false;
+    visitor.nearbySharingEnabled = true;
     await visitor.save();
 
     res.json({ success: true });
@@ -777,6 +778,7 @@ router.put('/location-denied', async (req, res) => {
 
     if (visitor) {
       visitor.locationDenied = true;
+      visitor.nearbySharingEnabled = false;
       await visitor.save();
     }
     res.json({ success: true });
