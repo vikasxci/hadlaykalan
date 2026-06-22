@@ -6,7 +6,7 @@ const AndroidDevice = require('../models/AndroidDevice');
 const LocationHistory = require('../models/LocationHistory');
 const auth = require('../middleware/auth');
 const upload = require('../middleware/upload');
-const { tryLinkByIp, tryLinkByPhone, tryLinkByFingerprint, tryLinkByLocation } = require('../helpers/ipLink');
+const { tryLinkByPhone, tryLinkByWeakSignals } = require('../helpers/ipLink');
 
 async function recordLocationVisit(entityType, entityId, snapshot) {
   await LocationHistory.create({ entityType, entityId, ...snapshot });
@@ -137,11 +137,9 @@ router.post('/track', async (req, res) => {
       }
 
       await visitor.save();
-      // Run all link strategies fire-and-forget
-      if (ip && ip !== 'unknown') tryLinkByIp(ip, 'visitor', visitor._id).catch(() => {});
+      // Run link strategies fire-and-forget — strong signals first, weak signals only link on 2+ matches
       if (visitor.registeredPhone) tryLinkByPhone(visitor.registeredPhone, 'visitor', visitor._id).catch(() => {});
-      if (visitor.screenWidth && visitor.screenHeight && visitor.language && visitor.timezone) tryLinkByFingerprint(visitor._id, 'visitor').catch(() => {});
-      if (visitor.latitude && visitor.longitude) tryLinkByLocation(visitor._id, 'visitor').catch(() => {});
+      tryLinkByWeakSignals(visitor._id, 'visitor').catch(() => {});
 
       const totalVisitors = await Visitor.countDocuments();
       return res.json({
@@ -216,8 +214,7 @@ router.post('/track', async (req, res) => {
       console.log('Creating visitor in DB...');
       const newVisitor = await Visitor.create(visitorData);
       console.log('✓ Visitor created successfully:', newVisitor._id);
-      if (ip && ip !== 'unknown') tryLinkByIp(ip, 'visitor', newVisitor._id).catch(() => {});
-      // screenWidth/height etc not yet known on first visit, phone/fingerprint/location will run on next ping
+      // screenWidth/height/location not yet known on first visit — weak signals will run on next ping
       
       const totalVisitors = await Visitor.countDocuments();
       
