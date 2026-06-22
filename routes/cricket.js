@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const CricketMatch = require('../models/CricketMatch');
+const CricketPlayer = require('../models/CricketPlayer');
 const Visitor = require('../models/Visitor');
 
 // Verify visitor has a registered profile (name + phone)
@@ -55,6 +56,19 @@ router.post('/matches', async (req, res) => {
       innings: []
     });
     await match.save();
+
+    // Upsert players into the global registry (fire-and-forget)
+    const allNames = [...match.teamAPlayers, ...match.teamBPlayers];
+    if (allNames.length) {
+      Promise.all(allNames.map(name =>
+        CricketPlayer.findOneAndUpdate(
+          { name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } },
+          { $setOnInsert: { name } },
+          { upsert: true, new: true }
+        )
+      )).catch(() => {});
+    }
+
     res.status(201).json(match);
   } catch (e) {
     res.status(500).json({ message: e.message });
@@ -188,6 +202,13 @@ router.post('/matches/:id/ball', async (req, res) => {
 
     // Wicket handling
     if (isWicket) {
+      if (newBatsman) {
+        const alreadyBatting = (inn.batsmen || []).some(b => b.name === newBatsman && b.status === 'batting');
+        const alreadyOut = (inn.batsmen || []).some(b => b.name === newBatsman && (b.status === 'out' || b.status === 'retired hurt'));
+        if (newBatsman === inn.striker || newBatsman === inn.nonStriker) return res.status(400).json({ message: 'नया बल्लेबाज पहले से क्रीज पर है।' });
+        if (alreadyBatting) return res.status(400).json({ message: 'यह खिलाड़ी पहले से बल्लेबाजी कर रहा है।' });
+        if (alreadyOut) return res.status(400).json({ message: 'यह खिलाड़ी पहले ही आउट हो चुका है।' });
+      }
       inn.wickets++;
       if (striker) { striker.status = 'out'; striker.outDesc = outDesc || 'out'; }
       inn.fallOfWickets.push({ score: inn.runs, over: `${inn.overs}.${inn.balls}`, batsman: inn.striker });
@@ -212,7 +233,6 @@ router.post('/matches/:id/ball', async (req, res) => {
     if (oversUp || allOut || chased) {
       inn.isCompleted = true;
       if (match.currentInnings === 1) {
-        // Start 2nd innings
         const target = inn.runs + 1;
         const battingTeam2 = inn.bowlingTeam;
         const bowlingTeam2 = inn.battingTeam;
@@ -222,6 +242,8 @@ router.post('/matches/:id/ball', async (req, res) => {
         match.status = 'completed';
         match.result = _calcResult(match);
       }
+      // Update player career records for this innings (fire-and-forget)
+      _updatePlayersFromInnings(inn, match._id, match.currentInnings - 1).catch(() => {});
     }
 
     match.updatedAt = new Date();
@@ -301,6 +323,162 @@ router.patch('/matches/:id/abandon', async (req, res) => {
     res.status(500).json({ message: e.message });
   }
 });
+
+// ── Player Registry ───────────────────────────────────────────
+
+// GET /api/cricket/leaderboard?type=batting|bowling&limit=25
+router.get('/leaderboard', async (req, res) => {
+  try {
+    const type  = req.query.type === 'bowling' ? 'bowling' : 'batting';
+    const limit = Math.min(50, parseInt(req.query.limit) || 25);
+
+    const sortField = type === 'batting' ? { 'batting.runs': -1 } : { 'bowling.wickets': -1 };
+    const filterField = type === 'batting' ? { 'batting.innings': { $gt: 0 } } : { 'bowling.innings': { $gt: 0 } };
+
+    const players = await CricketPlayer.find(filterField).sort(sortField).limit(limit).lean();
+
+    const rows = players.map(p => _formatPlayerStats(p)).map(p => {
+      const s = p.stats;
+      return type === 'batting'
+        ? { _id: p._id, name: p.name, innings: s.batting.innings, runs: s.batting.runs, highScore: s.batting.highScore, avg: s.batting.avg, strikeRate: s.batting.strikeRate, fifties: s.batting.fifties, hundreds: s.batting.hundreds }
+        : { _id: p._id, name: p.name, innings: s.bowling.innings, wickets: s.bowling.wickets, best: s.bowling.best, avg: s.bowling.avg, economy: s.bowling.economy, fiveWickets: s.bowling.fiveWickets };
+    });
+
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+// GET /api/cricket/players?q=search
+router.get('/players', async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    const filter = q ? { name: { $regex: q, $options: 'i' } } : {};
+    const players = await CricketPlayer.find(filter).sort({ name: 1 }).limit(20);
+    res.json(players);
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+// POST /api/cricket/players — create (or return existing)
+router.post('/players', async (req, res) => {
+  try {
+    const name = (req.body.name || '').trim();
+    if (!name || name.length < 2) return res.status(400).json({ message: 'Name too short' });
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existing = await CricketPlayer.findOne({ name: { $regex: `^${escaped}$`, $options: 'i' } });
+    if (existing) return res.json(existing);
+    const player = await CricketPlayer.create({ name });
+    res.status(201).json(player);
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+// GET /api/cricket/players/:id — player with career stats (read from stored fields)
+router.get('/players/:id', async (req, res) => {
+  try {
+    const player = await CricketPlayer.findById(req.params.id).lean();
+    if (!player) return res.status(404).json({ message: 'Player not found' });
+    res.json(_formatPlayerStats(player));
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
+});
+
+function _formatPlayerStats(p) {
+  const bat  = p.batting  || {};
+  const bowl = p.bowling  || {};
+  const field = p.fielding || {};
+  const outs = (bat.innings || 0) - (bat.notOuts || 0);
+  return {
+    _id: p._id, name: p.name, createdAt: p.createdAt,
+    matchCount: p.processedInningsKeys ? Math.ceil(p.processedInningsKeys.length / 2) : 0,
+    stats: {
+      batting: {
+        ...bat,
+        avg: outs > 0 ? (bat.runs / outs).toFixed(2) : (bat.runs > 0 ? '∞' : '0.00'),
+        strikeRate: bat.balls > 0 ? ((bat.runs / bat.balls) * 100).toFixed(2) : '0.00',
+      },
+      bowling: {
+        ...bowl,
+        avg:      bowl.wickets > 0 ? (bowl.runs / bowl.wickets).toFixed(2) : '-',
+        economy:  bowl.balls   > 0 ? ((bowl.runs / bowl.balls) * 6).toFixed(2) : '-',
+        best:     bowl.bestWickets > 0 ? `${bowl.bestWickets}/${bowl.bestRuns}` : '-',
+      },
+      fielding: field,
+    },
+  };
+}
+
+async function _updatePlayersFromInnings(inn, matchId, inningsIndex) {
+  const key = `${matchId}_${inningsIndex}`;
+
+  for (const b of (inn.batsmen || [])) {
+    if (!b.name || !(b.balls > 0)) continue;
+    const notOut = b.status !== 'out';
+    // Ensure player doc exists
+    await CricketPlayer.findOneAndUpdate(
+      { name: b.name },
+      { $setOnInsert: { name: b.name } },
+      { upsert: true }
+    );
+    // Idempotent stat increment — skipped if this innings key was already processed
+    await CricketPlayer.updateOne(
+      { name: b.name, processedInningsKeys: { $ne: key } },
+      {
+        $inc: {
+          'batting.innings': 1,
+          'batting.runs':    b.runs  || 0,
+          'batting.balls':   b.balls || 0,
+          ...(notOut                          && { 'batting.notOuts':  1 }),
+          ...((b.runs || 0) >= 100            && { 'batting.hundreds': 1 }),
+          ...((b.runs || 0) >= 50 && (b.runs || 0) < 100 && { 'batting.fifties': 1 }),
+        },
+        $max:    { 'batting.highScore': b.runs || 0 },
+        $addToSet: { processedInningsKeys: key },
+      }
+    );
+  }
+
+  for (const b of (inn.bowlers || [])) {
+    if (!b.name || !(b.balls > 0)) continue;
+    await CricketPlayer.findOneAndUpdate(
+      { name: b.name },
+      { $setOnInsert: { name: b.name } },
+      { upsert: true }
+    );
+    await CricketPlayer.updateOne(
+      { name: b.name, processedInningsKeys: { $ne: key } },
+      {
+        $inc: {
+          'bowling.innings':  1,
+          'bowling.balls':    b.balls   || 0,
+          'bowling.runs':     b.runs    || 0,
+          'bowling.wickets':  b.wickets || 0,
+          ...((b.wickets || 0) >= 5 && { 'bowling.fiveWickets': 1 }),
+        },
+        $addToSet: { processedInningsKeys: key },
+      }
+    );
+    // Update best bowling figures only if this performance is better
+    if ((b.wickets || 0) > 0) {
+      await CricketPlayer.updateOne(
+        {
+          name: b.name,
+          $or: [
+            { 'bowling.bestWickets': { $lt: b.wickets } },
+            { 'bowling.bestWickets': b.wickets, 'bowling.bestRuns': { $gt: b.runs || 0 } },
+            { 'bowling.bestWickets': 0 },
+          ],
+        },
+        { $set: { 'bowling.bestWickets': b.wickets, 'bowling.bestRuns': b.runs || 0 } }
+      );
+    }
+  }
+}
 
 function _buildDesc(r, isWicket, isWide, isNoBall, isBye, isLegBye, striker, outDesc) {
   if (isWicket) return `WICKET! ${outDesc || striker + ' out'}`;
