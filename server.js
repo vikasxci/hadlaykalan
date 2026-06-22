@@ -46,6 +46,7 @@ app.use('/api/market',       require('./routes/market'));
 app.use('/api/uptime',       require('./routes/uptime'));
 app.use('/api/schemes',      require('./routes/schemes'));
 app.use('/api/android',      require('./routes/androidDevices'));
+app.use('/api/cricket',      require('./routes/cricket'));
 
 // ── Service routes ───────────────────────────────────────────
 app.use('/api/mcs',          require('./routes/mcs'));
