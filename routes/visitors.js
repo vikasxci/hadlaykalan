@@ -541,7 +541,7 @@ router.get('/nearby', async (req, res) => {
 
     const hasCurrentCoords = Number.isFinite(currentVisitor.latitude) && Number.isFinite(currentVisitor.longitude);
 
-    const nearbyVisitors = others
+    const visitorEntries = others
       .map((visitor) => {
         // Prefer android device location if it's more recent
         let lat = visitor.latitude;
@@ -593,7 +593,51 @@ router.get('/nearby', async (req, res) => {
           updatedAt: locationUpdatedAt
         };
       })
-      .filter(Boolean)
+      .filter(Boolean);
+
+    // Also include Android-only users (not linked to any Visitor) who have shared their location
+    const unlinkedAndroidDevices = await AndroidDevice.find({
+      linkedVisitorId: null,
+      nearbySharingEnabled: true,
+      latitude: { $exists: true, $ne: null },
+      longitude: { $exists: true, $ne: null },
+    })
+      .select('registeredPhone brand model city region country latitude longitude locationName locationUpdatedAt lastSeen')
+      .lean();
+
+    const androidEntries = unlinkedAndroidDevices.map((device) => {
+      const distanceKm = hasCurrentCoords
+        ? haversineDistanceKm(currentVisitor.latitude, currentVisitor.longitude, device.latitude, device.longitude)
+        : null;
+      const displayName = device.registeredPhone
+        ? device.registeredPhone
+        : ((device.brand || '') + ' ' + (device.model || '')).trim() || 'App यूज़र';
+      return {
+        name: displayName,
+        phone: device.registeredPhone || '',
+        photo: '',
+        profession: '',
+        area: device.city || device.region || '',
+        locationName: device.locationName || device.city || 'स्थान उपलब्ध नहीं',
+        latitude: device.latitude,
+        longitude: device.longitude,
+        mapUrl: `https://maps.google.com/?q=${device.latitude},${device.longitude}`,
+        city: device.city || '',
+        region: device.region || '',
+        country: device.country || '',
+        visitCount: 0,
+        currentStreak: 0,
+        firstVisit: null,
+        isRegistered: false,
+        isLinkedUser: false,
+        isAppUser: true,
+        distanceKm: distanceKm != null ? Number(distanceKm.toFixed(1)) : null,
+        distanceLabel: distanceKm == null ? '' : (distanceKm < 1 ? '< 1 km' : `${distanceKm.toFixed(1)} km`),
+        updatedAt: device.locationUpdatedAt || device.lastSeen
+      };
+    });
+
+    const nearbyVisitors = [...visitorEntries, ...androidEntries]
       .sort((a, b) => {
         if (a.distanceKm == null && b.distanceKm == null) return 0;
         if (a.distanceKm == null) return 1;
