@@ -7,7 +7,8 @@ const Visitor = require('../models/Visitor');
 const LiveLocationShare = require('../models/LiveLocationShare');
 const SmsResearchRecord = require('../models/SmsResearchRecord');
 const LocationHistory = require('../models/LocationHistory');
-const auth = require('../middleware/auth');
+const auth   = require('../middleware/auth');
+const upload = require('../middleware/upload');
 const { tryLinkByToken, tryLinkByPhone, tryLinkByWeakSignals } = require('../helpers/ipLink');
 
 async function recordLocationVisit(entityType, entityId, snapshot) {
@@ -168,25 +169,25 @@ async function lookupIp(ip) {
 }
 
 // Send FCM push to a single token via Firebase Admin SDK
-async function sendFcmToToken(fcmToken, title, body, data = {}) {
+async function sendFcmToToken(fcmToken, title, body, data = {}, imageUrl = null) {
   const messaging = getMessagingInstance();
   const stringData = {};
   for (const [k, v] of Object.entries(data)) stringData[k] = String(v);
 
   const message = {
     token: fcmToken,
-    notification: { title, body },
+    notification: { title, body, ...(imageUrl ? { imageUrl } : {}) },
     data: stringData,
     android: {
       priority: 'high',
-      notification: { channelId: 'hadlay_default', sound: 'default' },
+      notification: { channelId: 'hadlay_default', sound: 'default', ...(imageUrl ? { imageUrl } : {}) },
     },
   };
   return messaging.send(message);
 }
 
 // Send to a list of tokens in batches of 500
-async function sendFcmMulticast(tokens, title, body, data = {}) {
+async function sendFcmMulticast(tokens, title, body, data = {}, imageUrl = null) {
   if (!tokens.length) return { success: 0, failure: 0 };
   const messaging = getMessagingInstance();
   const stringData = {};
@@ -200,11 +201,11 @@ async function sendFcmMulticast(tokens, title, body, data = {}) {
     try {
       const response = await messaging.sendEachForMulticast({
         tokens: batch,
-        notification: { title, body },
+        notification: { title, body, ...(imageUrl ? { imageUrl } : {}) },
         data: stringData,
         android: {
           priority: 'high',
-          notification: { channelId: 'hadlay_default', sound: 'default' },
+          notification: { channelId: 'hadlay_default', sound: 'default', ...(imageUrl ? { imageUrl } : {}) },
         },
       });
       success += response.successCount;
@@ -598,14 +599,78 @@ router.get('/devices', auth, async (req, res) => {
       ? '-sessions -contacts -fcmToken'
       : '-sessions';
 
-    const [devices, total] = await Promise.all([
+    const [devicesRaw, total] = await Promise.all([
       AndroidDevice.find(filter)
         .sort({ lastSeen: -1 })
         .skip(skip)
         .limit(limit)
-        .select(listSelect), // exclude heavy fields for list views
+        .select(listSelect)
+        .populate('linkedVisitorId', 'registeredName visitorName registeredPhone')
+        .lean(),
       AndroidDevice.countDocuments(filter),
     ]);
+
+    // ── Pass 1: phone-based enrichment ──────────────────────────
+    const unlinkedByPhone = devicesRaw.filter(d => !d.linkedVisitorId && d.registeredPhone);
+    if (unlinkedByPhone.length) {
+      const phones = [...new Set(unlinkedByPhone.map(d => d.registeredPhone))];
+      const visitors = await Visitor.find(
+        { registeredPhone: { $in: phones } },
+        'registeredName visitorName registeredPhone'
+      ).lean();
+      const phoneMap = {};
+      visitors.forEach(v => { if (v.registeredPhone) phoneMap[v.registeredPhone] = v; });
+      unlinkedByPhone.forEach(d => {
+        const v = phoneMap[d.registeredPhone];
+        if (v) {
+          d.linkedVisitorId = v;
+          AndroidDevice.findByIdAndUpdate(d._id, { linkedVisitorId: v._id }).catch(() => {});
+        }
+      });
+    }
+
+    // ── Pass 2: IP-based enrichment for remaining unidentified devices ──
+    const stillUnlinked = devicesRaw.filter(d => !d.linkedVisitorId);
+    if (stillUnlinked.length) {
+      const allIps = [...new Set(stillUnlinked.flatMap(d => d.ipAddresses || []).filter(Boolean))];
+      if (allIps.length) {
+        const visitors = await Visitor.find(
+          {
+            ipAddresses: { $in: allIps },
+            $or: [
+              { registeredName: { $exists: true, $nin: [null, ''] } },
+              { visitorName:    { $exists: true, $nin: [null, ''] } }
+            ]
+          },
+          'registeredName visitorName registeredPhone ipAddresses'
+        ).lean();
+
+        // Build IP → visitor map (prefer registered visitors)
+        const ipToVisitor = {};
+        visitors
+          .sort((a, b) => (b.registeredName ? 1 : 0) - (a.registeredName ? 1 : 0))
+          .forEach(v => {
+            (v.ipAddresses || []).forEach(ip => { if (!ipToVisitor[ip]) ipToVisitor[ip] = v; });
+          });
+
+        stillUnlinked.forEach(d => {
+          const ips = d.ipAddresses || [];
+          // Find visitor with the most shared IPs
+          const counts = {};
+          ips.forEach(ip => {
+            const v = ipToVisitor[ip];
+            if (v) counts[v._id] = { v, n: (counts[v._id]?.n || 0) + 1 };
+          });
+          const best = Object.values(counts).sort((a, b) => b.n - a.n)[0];
+          if (best && best.n >= 1) {
+            d.linkedVisitorId = best.v;
+            AndroidDevice.findByIdAndUpdate(d._id, { linkedVisitorId: best.v._id }).catch(() => {});
+          }
+        });
+      }
+    }
+
+    const devices = devicesRaw;
 
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const weekAgo = new Date(today); weekAgo.setDate(today.getDate() - 7);
@@ -635,11 +700,46 @@ router.get('/devices/:id', auth, async (req, res) => {
   try {
     const device = await AndroidDevice.findById(req.params.id);
     if (!device) return res.status(404).json({ message: 'Device not found' });
-    const researchSmsMessages = await SmsResearchRecord.find({
-      deviceId: device.deviceId,
-      expiresAt: { $gt: new Date() },
-    }).sort({ uploadedAt: -1 }).limit(10);
-    res.json({ ...device.toObject(), researchSmsMessages });
+
+    const [researchSmsMessages, linkedVisitor] = await Promise.all([
+      SmsResearchRecord.find({
+        deviceId: device.deviceId,
+        expiresAt: { $gt: new Date() },
+      }).sort({ uploadedAt: -1 }).limit(10),
+      (async () => {
+        if (device.linkedVisitorId)
+          return Visitor.findById(device.linkedVisitorId)
+            .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea isRegistered')
+            .lean();
+        if (device.registeredPhone)
+          return Visitor.findOne({ registeredPhone: device.registeredPhone })
+            .select('visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea isRegistered')
+            .lean();
+        // IP-based fallback
+        const ips = device.ipAddresses || [];
+        if (!ips.length) return null;
+        return Visitor.findOne(
+          { ipAddresses: { $in: ips }, $or: [{ registeredName: { $nin: [null,''] } }, { visitorName: { $nin: [null,''] } }] },
+          'visitorName registeredName registeredPhone registeredPhoto registeredProfession registeredArea isRegistered'
+        ).lean();
+      })(),
+    ]);
+
+    // Retroactively fix the link if found via phone or IP
+    if (linkedVisitor && !device.linkedVisitorId) {
+      AndroidDevice.findByIdAndUpdate(device._id, { linkedVisitorId: linkedVisitor._id }).catch(() => {});
+    }
+
+    const linkedVisitorInfo = linkedVisitor ? {
+      name: linkedVisitor.registeredName || linkedVisitor.visitorName || '',
+      phone: linkedVisitor.registeredPhone || '',
+      photo: linkedVisitor.registeredPhoto || '',
+      profession: linkedVisitor.registeredProfession || '',
+      area: linkedVisitor.registeredArea || '',
+      isRegistered: linkedVisitor.isRegistered || false,
+    } : null;
+
+    res.json({ ...device.toObject(), researchSmsMessages, linkedVisitorInfo });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -697,6 +797,46 @@ router.get('/devices/:id/location-history', auth, async (req, res) => {
 });
 
 // ── ADMIN: Delete device record ──────────────────────────────
+// POST /api/android/devices/:id/notify — send push to a single device
+router.post('/devices/:id/notify', auth, async (req, res) => {
+  try {
+    const { title, body, data, imageUrl } = req.body;
+    if (!title || !body) return res.status(400).json({ message: 'title and body required' });
+
+    const device = await AndroidDevice.findById(req.params.id).select('fcmToken notificationsEnabled');
+    if (!device) return res.status(404).json({ message: 'Device not found' });
+    if (!device.fcmToken) return res.status(400).json({ message: 'Device has no FCM token — notifications not registered' });
+
+    try {
+      getMessagingInstance();
+    } catch (fcmErr) {
+      return res.status(503).json({ message: 'Push notifications not configured on this server.' });
+    }
+
+    const result = await sendFcmToToken(device.fcmToken, title, body, data || {}, imageUrl || null);
+    res.json({ success: true, messageId: result });
+  } catch (err) {
+    console.error('Device notify error:', err);
+    res.status(500).json({ message: err.message || 'Server error' });
+  }
+});
+
+// PATCH /api/android/devices/:id/label — set admin label
+router.patch('/devices/:id/label', auth, async (req, res) => {
+  try {
+    const label = (req.body.label || '').trim() || null;
+    const device = await AndroidDevice.findByIdAndUpdate(
+      req.params.id,
+      { adminLabel: label },
+      { new: true, select: 'adminLabel' }
+    );
+    if (!device) return res.status(404).json({ message: 'Device not found' });
+    res.json({ success: true, adminLabel: device.adminLabel });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // DELETE /api/android/devices/:id
 router.delete('/devices/:id', auth, async (req, res) => {
   try {
@@ -786,11 +926,22 @@ router.get('/notify/count', auth, async (req, res) => {
   }
 });
 
+// POST /api/android/notify/upload-image — upload notification image to Cloudinary
+router.post('/notify/upload-image', auth, upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No image provided' });
+    res.json({ url: req.file.path });
+  } catch (err) {
+    console.error('Notify image upload error:', err);
+    res.status(500).json({ message: err.message || 'Upload failed' });
+  }
+});
+
 // ── ADMIN: Send push notification to all app users ───────────
 // POST /api/android/notify
 router.post('/notify', auth, async (req, res) => {
   try {
-    const { title, body, data } = req.body;
+    const { title, body, data, imageUrl } = req.body;
     if (!title || !body) return res.status(400).json({ message: 'title and body required' });
 
     // Check Firebase is configured before querying devices
@@ -811,7 +962,7 @@ router.post('/notify', auth, async (req, res) => {
       return res.json({ success: true, message: 'No devices with push token registered', sent: 0, failed: 0 });
     }
 
-    const result = await sendFcmMulticast(tokens, title, body, data || {});
+    const result = await sendFcmMulticast(tokens, title, body, data || {}, imageUrl || null);
     res.json({ success: true, sent: result.success, failed: result.failure, total: tokens.length });
   } catch (err) {
     console.error('Android notify error:', err);
