@@ -70,6 +70,9 @@ const androidDeviceSchema = new mongoose.Schema({
   // Linked web visitor (matched by IP / token / phone / fingerprint / location)
   linkedVisitorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Visitor', default: null },
 
+  // Admin-assigned label (overrides auto-detected identity in UI)
+  adminLabel: { type: String, default: null },
+
   // FCM push notification token
   fcmToken:     { type: String, default: null },
   fcmTokenUpdatedAt: { type: Date },
