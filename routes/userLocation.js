@@ -1,18 +1,8 @@
 const express = require('express');
 const router  = express.Router();
 const auth    = require('../middleware/auth');
-const UserLocation   = require('../models/UserLocation');
-const Visitor        = require('../models/Visitor');
-const AndroidDevice  = require('../models/AndroidDevice');
-
-function getClientIp(req) {
-  return (
-    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-    req.headers['x-real-ip'] ||
-    req.connection?.remoteAddress ||
-    req.ip || ''
-  );
-}
+const UserLocation = require('../models/UserLocation');
+const Visitor      = require('../models/Visitor');
 
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -24,29 +14,28 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// ── PUBLIC: Record a web visitor's location ──────────────────
+function parseCoords(latitude, longitude) {
+  const lat = parseFloat(latitude);
+  const lon = parseFloat(longitude);
+  if (!isFinite(lat) || !isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  return { lat, lon };
+}
+
+// ── PUBLIC: Record web visitor location ──────────────────────
 // POST /api/user-location/record
 router.post('/record', async (req, res) => {
   try {
     const { latitude, longitude, accuracy, visitorToken, locationName } = req.body;
 
-    const lat = parseFloat(latitude);
-    const lon = parseFloat(longitude);
-    if (!isFinite(lat) || !isFinite(lon)) {
-      return res.status(400).json({ message: 'Valid latitude and longitude required' });
-    }
-    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
-      return res.status(400).json({ message: 'Coordinates out of range' });
-    }
+    const coords = parseCoords(latitude, longitude);
+    if (!coords) return res.status(400).json({ message: 'Valid latitude and longitude required' });
 
-    const ip = getClientIp(req);
-    const ua = (req.headers['user-agent'] || '').slice(0, 300);
-
-    // Resolve display name from visitor token
     let visitorId = null;
     let displayName = null;
     if (visitorToken) {
-      const visitor = await Visitor.findOne({ visitorToken }).select('visitorName registeredName _id').lean();
+      const visitor = await Visitor.findOne({ visitorToken })
+        .select('visitorName registeredName _id').lean();
       if (visitor) {
         visitorId = visitor._id;
         displayName = visitor.registeredName || visitor.visitorName || null;
@@ -57,12 +46,10 @@ router.post('/record', async (req, res) => {
       source: 'web',
       visitorId,
       displayName,
-      latitude: lat,
-      longitude: lon,
+      latitude: coords.lat,
+      longitude: coords.lon,
       accuracy: accuracy ? parseFloat(accuracy) : null,
       locationName: locationName || '',
-      ip,
-      userAgent: ua,
     });
 
     res.json({ success: true });
@@ -72,27 +59,38 @@ router.post('/record', async (req, res) => {
   }
 });
 
-// ── PUBLIC: Record location from Android app ─────────────────
-// POST /api/user-location/record-android (called from AndroidDevice ping enrichment)
+// ── PUBLIC: Record Android app user location ──────────────────
+// POST /api/user-location/record-android
 router.post('/record-android', async (req, res) => {
   try {
-    const { androidDeviceId, latitude, longitude, accuracy, displayName, city, region, country } = req.body;
+    const { latitude, longitude, accuracy, visitorToken, displayName, city, region, country, locationName } = req.body;
 
-    const lat = parseFloat(latitude);
-    const lon = parseFloat(longitude);
-    if (!isFinite(lat) || !isFinite(lon)) return res.status(400).json({ message: 'Invalid coordinates' });
+    const coords = parseCoords(latitude, longitude);
+    if (!coords) return res.status(400).json({ message: 'Invalid coordinates' });
+
+    // Resolve visitor identity same as web — android app may pass a visitorToken
+    let visitorId = null;
+    let resolvedName = displayName || null;
+    if (visitorToken) {
+      const visitor = await Visitor.findOne({ visitorToken })
+        .select('visitorName registeredName _id').lean();
+      if (visitor) {
+        visitorId = visitor._id;
+        resolvedName = resolvedName || visitor.registeredName || visitor.visitorName || null;
+      }
+    }
 
     await UserLocation.create({
       source: 'android',
-      androidDeviceId: androidDeviceId || null,
-      displayName: displayName || null,
-      latitude: lat,
-      longitude: lon,
+      visitorId,
+      displayName: resolvedName,
+      latitude: coords.lat,
+      longitude: coords.lon,
       accuracy: accuracy ? parseFloat(accuracy) : null,
+      locationName: locationName || '',
       city: city || '',
       region: region || '',
       country: country || '',
-      ip: getClientIp(req),
     });
 
     res.json({ success: true });
@@ -123,41 +121,34 @@ router.get('/', auth, async (req, res) => {
         .sort({ recordedAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate('visitorId',       'registeredName visitorName registeredPhone')
-        .populate('androidDeviceId', 'brand model adminLabel linkedVisitorId')
+        .populate('visitorId', 'registeredName visitorName registeredPhone')
         .lean(),
       UserLocation.countDocuments(filter),
     ]);
 
     const enriched = records.map(r => {
-      // Best display name: model displayName → populated visitor → device label
-      let name = r.displayName;
-      if (!name && r.visitorId) {
-        name = r.visitorId.registeredName || r.visitorId.visitorName || null;
-      }
-      if (!name && r.androidDeviceId) {
-        name = r.androidDeviceId.adminLabel ||
-          `${r.androidDeviceId.brand || ''} ${r.androidDeviceId.model || ''}`.trim() || null;
-      }
+      const name = r.displayName ||
+        r.visitorId?.registeredName ||
+        r.visitorId?.visitorName ||
+        '—';
 
       const distanceKm = hasAdminPos
         ? parseFloat(haversineKm(adminLat, adminLon, r.latitude, r.longitude).toFixed(2))
         : null;
 
       return {
-        _id:         r._id,
-        source:      r.source,
-        name:        name || '—',
-        phone:       r.visitorId?.registeredPhone || '',
-        latitude:    r.latitude,
-        longitude:   r.longitude,
-        accuracy:    r.accuracy,
-        city:        r.city,
-        region:      r.region,
-        country:     r.country,
+        _id:          r._id,
+        source:       r.source,
+        name,
+        phone:        r.visitorId?.registeredPhone || '',
+        latitude:     r.latitude,
+        longitude:    r.longitude,
+        accuracy:     r.accuracy,
         locationName: r.locationName,
-        ip:          r.ip,
-        recordedAt:  r.recordedAt,
+        city:         r.city,
+        region:       r.region,
+        country:      r.country,
+        recordedAt:   r.recordedAt,
         distanceKm,
       };
     });
@@ -169,7 +160,7 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// ── ADMIN: Stats summary ─────────────────────────────────────
+// ── ADMIN: Stats summary ──────────────────────────────────────
 // GET /api/user-location/stats
 router.get('/stats', auth, async (req, res) => {
   try {
