@@ -18,7 +18,21 @@ const farmerTipSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });
 
-const MandiRate = mongoose.model('MandiRate', mandiRateSchema);
-const FarmerTip = mongoose.model('FarmerTip', farmerTipSchema);
+const mandiCropSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true, trim: true },
+  nameHi: { type: String, trim: true, default: '' },
+  isActive: { type: Boolean, default: true }
+}, { timestamps: true });
 
-module.exports = { MandiRate, FarmerTip };
+const mandiMarketSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true, trim: true },
+  location: { type: String, trim: true, default: '' },
+  isActive: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const MandiRate = mongoose.models.MandiRate || mongoose.model('MandiRate', mandiRateSchema);
+const FarmerTip = mongoose.models.FarmerTip || mongoose.model('FarmerTip', farmerTipSchema);
+const MandiCrop = mongoose.models.MandiCrop || mongoose.model('MandiCrop', mandiCropSchema);
+const MandiMarket = mongoose.models.MandiMarket || mongoose.model('MandiMarket', mandiMarketSchema);
+
+module.exports = { MandiRate, FarmerTip, MandiCrop, MandiMarket };
