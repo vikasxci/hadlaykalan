@@ -13,6 +13,15 @@ module.exports = function(req, res, next) {
   }
 };
 
+// Only main admin can manage sub-admins
+module.exports.requireAdmin = function(req, res, next) {
+  if (req.admin && req.admin.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({ message: 'Only the main admin can perform this action' });
+  }
+};
+
 // Role-based middleware factory
 module.exports.requireRole = function(role) {
   return function(req, res, next) {
