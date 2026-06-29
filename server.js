@@ -129,6 +129,19 @@ mongoose.connect(process.env.MONGODB_URI)
         console.log('Default sarpanch created');
       }
     }
+    // Seed market rate admin (set MARKET_RATE_EMAIL and MARKET_RATE_PASSWORD in .env)
+    if (process.env.MARKET_RATE_EMAIL && process.env.MARKET_RATE_PASSWORD) {
+      const marketRateExists = await Admin.findOne({ email: process.env.MARKET_RATE_EMAIL });
+      if (!marketRateExists) {
+        await Admin.create({
+          email: process.env.MARKET_RATE_EMAIL,
+          password: process.env.MARKET_RATE_PASSWORD,
+          name: 'Market Rate Manager',
+          role: 'market_rate'
+        });
+        console.log('Market rate admin created');
+      }
+    }
     // Seed contest admin user
     const contestAdminEmail = 'contest.admin@hadlaykalan.com';
     const contestAdminExists = await Admin.findOne({ email: contestAdminEmail });
