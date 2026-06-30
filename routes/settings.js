@@ -2,7 +2,47 @@ const express = require('express');
 const router = express.Router();
 const AreaLocation = require('../models/AreaLocation');
 const Role = require('../models/Role');
+const AppConfig = require('../models/AppConfig');
 const auth = require('../middleware/auth');
+
+// ── App Config keys with defaults ─────────────────────────────
+const APP_CONFIG_DEFAULTS = {
+  apkUrl:          '',
+  bannerEnabled:   true,
+  bannerTitle:     'हडलाय कलां ऐप',
+  bannerSubtitle:  'नोटिफिकेशन पाएं • तेज़ अनुभव',
+  homeCardTagline: 'Android ऐप डाउनलोड करें',
+};
+
+// GET /api/settings/app-config  — public, returns merged defaults + DB values
+router.get('/app-config', async (req, res) => {
+  try {
+    const docs = await AppConfig.find();
+    const result = { ...APP_CONFIG_DEFAULTS };
+    docs.forEach(d => { result[d.key] = d.value; });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/settings/app-config/:key  — admin only, upsert one key
+router.put('/app-config/:key', auth, async (req, res) => {
+  try {
+    const { key } = req.params;
+    if (!Object.prototype.hasOwnProperty.call(APP_CONFIG_DEFAULTS, key)) {
+      return res.status(400).json({ message: `Unknown config key: ${key}` });
+    }
+    const doc = await AppConfig.findOneAndUpdate(
+      { key },
+      { value: req.body.value, updatedAt: new Date() },
+      { upsert: true, new: true }
+    );
+    res.json(doc);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 
 // ============ AREA LOCATIONS ============
 
