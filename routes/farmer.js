@@ -4,6 +4,44 @@ const { MandiRate, FarmerTip, MandiCrop, MandiMarket } = require('../models/Farm
 const auth = require('../middleware/auth');
 const upload = require('../middleware/upload');
 const cloudinary = require('cloudinary').v2;
+const AndroidDevice = require('../models/AndroidDevice');
+
+function getFcmHelper() {
+  return require('./androidDevices');
+}
+
+// Per-market cooldown: send at most 1 notification per market per 30 minutes
+const _mandiNotifyCooldown = {};
+function canNotifyMarket(marketName) {
+  const last = _mandiNotifyCooldown[marketName];
+  if (!last) return true;
+  return Date.now() - last > 30 * 60 * 1000;
+}
+
+async function notifyMandiRate(rate) {
+  const market = rate.market || 'मंडी';
+  if (!canNotifyMarket(market)) return;
+  _mandiNotifyCooldown[market] = Date.now();
+  try {
+    const devices = await AndroidDevice.find(
+      { fcmToken: { $exists: true, $ne: null } },
+      'fcmToken'
+    );
+    const tokens = devices.map(d => d.fcmToken).filter(Boolean);
+    if (!tokens.length) return;
+
+    const helper = getFcmHelper();
+    if (typeof helper.sendFcmMulticast !== 'function') return;
+
+    const unit = rate.unit || 'प्रति क्विंटल';
+    const title = `🌾 आज का मंडी भाव - ${market}`;
+    const body = `${rate.crop}: ₹${rate.price} ${unit}`;
+
+    await helper.sendFcmMulticast(tokens, title, body, { type: 'farmer', clickUrl: '/farmer' });
+  } catch (err) {
+    console.error('[Farmer] FCM notify error:', err.message);
+  }
+}
 
 // ---- Mandi Rates ----
 router.get('/mandi-rates', async (req, res) => {
@@ -19,6 +57,7 @@ router.post('/mandi-rates', auth, async (req, res) => {
   try {
     const rate = new MandiRate(req.body);
     await rate.save();
+    notifyMandiRate(rate);
     res.status(201).json(rate);
   } catch (err) {
     res.status(500).json({ message: err.message });
