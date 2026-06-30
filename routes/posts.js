@@ -4,7 +4,38 @@ const crypto = require('crypto');
 const Post = require('../models/Post');
 const auth = require('../middleware/auth');
 const upload = require('../middleware/upload');
-const cloudinary = require('cloudinary').v2
+const cloudinary = require('cloudinary').v2;
+const AndroidDevice = require('../models/AndroidDevice');
+
+function getFcmHelper() {
+  return require('./androidDevices');
+}
+
+async function notifyNewPost(post) {
+  try {
+    const devices = await AndroidDevice.find(
+      { fcmToken: { $exists: true, $ne: null } },
+      'fcmToken'
+    );
+    const tokens = devices.map(d => d.fcmToken).filter(Boolean);
+    if (!tokens.length) return;
+
+    const helper = getFcmHelper();
+    if (typeof helper.sendFcmMulticast !== 'function') return;
+
+    const topicLabels = {
+      issue: 'समस्या', good_work: 'अच्छा काम', announcement: 'घोषणा',
+      feedback: 'प्रतिक्रिया', thanks: 'धन्यवाद', message: 'संदेश', other: 'अन्य',
+    };
+    const topicLabel = topicLabels[post.topic] || 'पोस्ट';
+    const title = `📢 नई ${topicLabel} - ${post.name}`;
+    const body = post.title.length > 80 ? post.title.slice(0, 77) + '...' : post.title;
+
+    await helper.sendFcmMulticast(tokens, title, body, { type: 'post', clickUrl: '/posts' });
+  } catch (err) {
+    console.error('[Posts] FCM notify error:', err.message);
+  }
+}
 
 // GET all approved posts (public)
 router.get('/', async (req, res) => {
@@ -386,8 +417,13 @@ router.put('/:id/toggle-approval', auth, async (req, res) => {
   try {
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ message: 'Post not found' });
+    const wasApproved = post.isApproved;
     post.isApproved = !post.isApproved;
     await post.save();
+    // Notify all users only when post is newly approved (not when unapproved)
+    if (!wasApproved && post.isApproved) {
+      notifyNewPost(post);
+    }
     res.json(post);
   } catch (err) {
     res.status(500).json({ message: err.message });
