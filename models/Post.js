@@ -17,7 +17,7 @@ const postSchema = new mongoose.Schema({
   content: { type: String, required: true },
   topic: {
     type: String,
-    enum: ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'other'],
+    enum: ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'lost_found', 'other'],
     default: 'message'
   },
   profilePic: { type: String }, // Cloudinary URL
