@@ -25,7 +25,7 @@ async function notifyNewPost(post) {
 
     const topicLabels = {
       issue: 'समस्या', good_work: 'अच्छा काम', announcement: 'घोषणा',
-      feedback: 'प्रतिक्रिया', thanks: 'धन्यवाद', message: 'संदेश', other: 'अन्य',
+      feedback: 'प्रतिक्रिया', thanks: 'धन्यवाद', message: 'संदेश', lost_found: 'खोया-पाया', other: 'अन्य',
     };
     const topicLabel = topicLabels[post.topic] || 'पोस्ट';
     const title = `📢 नई ${topicLabel} - ${post.name}`;
@@ -92,7 +92,7 @@ router.post('/', upload.fields([
       visitorToken: visitorToken || '',
       title: title.trim(),
       content: content.trim(),
-      topic: topic && ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'other'].includes(topic) ? topic : 'message',
+      topic: topic && ['issue', 'good_work', 'message', 'announcement', 'feedback', 'thanks', 'lost_found', 'other'].includes(topic) ? topic : 'message',
       editToken
     };
 
