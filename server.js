@@ -39,6 +39,7 @@ app.use('/api/weather',      require('./routes/weather'));
 app.use('/api/village-info', require('./routes/villageInfo'));
 app.use('/api/contest',      require('./routes/contest'));
 app.use('/api/posts',        require('./routes/posts'));
+app.use('/api/stories',      require('./routes/stories'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/visitors',     require('./routes/visitors'));
 app.use('/api/worker',       require('./routes/worker'));
@@ -100,6 +101,9 @@ mongoose.connect(process.env.MONGODB_URI)
     // Start weather push notification cron
     const { startWeatherCron } = require('./services/weatherNotificationCron');
     startWeatherCron();
+    // Start 24h status/story expiry cleanup cron
+    const { startStoryExpiryCron } = require('./services/storyExpiryCron');
+    startStoryExpiryCron();
     // Seed admin user
     const Admin = require('./models/Admin');
     const existing = await Admin.findOne({ email: process.env.ADMIN_EMAIL });
