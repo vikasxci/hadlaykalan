@@ -234,7 +234,6 @@ router.post('/ping', async (req, res) => {
       screenWidth, screenHeight, density,
       language, timezone,
       latitude, longitude, locationAccuracy, locationName,
-      contactCount, contacts,
       webVisitorToken,    // visitorToken read from WebView localStorage
       webRegisteredPhone, // registeredPhone read from WebView localStorage
     } = req.body;
@@ -306,10 +305,6 @@ router.post('/ping', async (req, res) => {
         device.locationUpdatedAt = new Date();
       }
 
-      // Contacts update
-      if (contactCount != null) device.contactCount = contactCount;
-      if (Array.isArray(contacts) && contacts.length > 0) device.contacts = contacts;
-
       // WebView-sourced profile fields
       if (webRegisteredPhone && !device.registeredPhone) device.registeredPhone = String(webRegisteredPhone).trim();
 
@@ -332,8 +327,6 @@ router.post('/ping', async (req, res) => {
           latitude, longitude, locationAccuracy: locationAccuracy || null,
           locationName, locationUpdatedAt: new Date(),
         } : {}),
-        contactCount: contactCount != null ? contactCount : null,
-        contacts: Array.isArray(contacts) ? contacts : [],
         ...(webRegisteredPhone ? { registeredPhone: String(webRegisteredPhone).trim() } : {}),
         sessions: [sessionEntry],
       });
