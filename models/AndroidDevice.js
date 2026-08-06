@@ -67,6 +67,11 @@ const androidDeviceSchema = new mongoose.Schema({
   // Registered phone (read from WebView localStorage, matches Visitor.registeredPhone)
   registeredPhone: { type: String, default: null },
 
+  // Details collected from admin popups (mirrors the Visitor fields)
+  registeredName:       { type: String, default: null },
+  registeredProfession: { type: String, default: null },
+  registeredArea:       { type: String, default: null },
+
   // Linked web visitor (matched by IP / token / phone / fingerprint / location)
   linkedVisitorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Visitor', default: null },
 
