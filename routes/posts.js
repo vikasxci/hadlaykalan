@@ -456,4 +456,34 @@ router.delete('/:id/admin/comments/:commentId', auth, async (req, res) => {
   }
 });
 
+
+/* ── Admin: boost likes ──────────────────────────────────────
+   Adds likes to a post from the Admin Panel. The site shows a single number,
+   but `boostedLikes` records how many were added so genuine engagement stays
+   measurable. Send a negative number to take them back off. */
+router.post('/:id/boost', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    const delta = Math.max(-5000, Math.min(parseInt(req.body.likes, 10) || 0, 5000));
+    if (!delta) return res.status(400).json({ message: 'Give a number of likes to add' });
+
+    // Never let a boost pull the total below the organic likes it started with.
+    const organic = Math.max(0, (post.likes || 0) - (post.boostedLikes || 0));
+    const nextBoost = Math.max(0, (post.boostedLikes || 0) + delta);
+
+    post.boostedLikes = nextBoost;
+    post.likes = organic + nextBoost;
+    await post.save();
+
+    res.json({
+      message: delta > 0 ? `Added ${delta} like(s)` : `Removed ${-delta} like(s)`,
+      likes: post.likes, boostedLikes: post.boostedLikes, realLikes: organic
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
