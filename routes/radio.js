@@ -108,20 +108,31 @@ router.post('/play', async (req, res) => {
 });
 
 /*
- * The player failed to play a song. Which codes mean what:
+ * A listener's player failed to play a song. A failing song must disappear for
+ * everyone else — but "failing" has to be established, not assumed, or one
+ * person on a weak signal empties the playlist.
  *
- *   100 / 101 / 150 → permanent. Removed, private, or the owner blocks
- *                     embedding. Nobody will ever play it here.
- *   2 / 5 / anything else → NOT the song's fault. Code 5 is a generic HTML5
- *                     player error that fires on flaky connections, unusual
- *                     devices and during rapid track changes. Retiring songs
- *                     on these turns one bad network into a dead playlist.
+ * Two independent ways a song gets pulled:
  *
- * A song is only ever switched off when a permanent code is BACKED UP by an
- * independent check against YouTube, so a good song cannot be retired by a
- * listener with a bad connection.
+ *   1. YouTube confirms it. Codes 100/101/150 mean removed, private, or
+ *      embedding blocked. Verified against YouTube, then retired immediately —
+ *      one report is enough because the evidence is authoritative.
+ *
+ *   2. It keeps failing for DIFFERENT people. Region locks and age gates are
+ *      invisible to YouTube's public endpoints, so a song can be genuinely
+ *      unplayable here while every check says it is fine. Once it has failed
+ *      for DISTINCT_LISTENER_LIMIT separate listeners it is retired too.
+ *
+ * Code 5 (generic HTML5 error) and code 2 still count toward rule 2, but a
+ * single listener hitting them repeatedly never retires anything.
  */
 const PERMANENT_ERROR_CODES = new Set([100, 101, 150]);
+
+// How many *different* listeners a song must fail for before it is pulled from
+// the playlist even though YouTube claims it is fine. One listener is a bad
+// connection; three separate people is a broken song. Village listeners often
+// share a tower, so this is deliberately not 2.
+const DISTINCT_LISTENER_LIMIT = 3;
 
 router.post('/track-error', async (req, res) => {
   try {
@@ -130,6 +141,7 @@ router.post('/track-error', async (req, res) => {
       return res.status(400).json({ message: 'Invalid videoId' });
     }
     const code = Number(req.body.code);
+    const who = String(req.body.visitorToken || '').slice(0, 120);
 
     // Scope to the playlist being listened to — the same song can sit in
     // several playlists and a strike must not land on the wrong copy.
@@ -142,28 +154,49 @@ router.post('/track-error', async (req, res) => {
     if (!track) return res.json({ ok: true });
 
     track.lastErrorAt = new Date();
-
-    if (!PERMANENT_ERROR_CODES.has(code)) {
-      // Transient: record it so the admin can see a pattern, never retire.
-      track.errorCount += 1;
-      await track.save();
-      return res.json({ ok: true, deactivated: false, transient: true });
-    }
-
-    // Permanent code — confirm with YouTube before taking the song away.
-    const verdict = await checkEmbeddable(videoId);
-    if (verdict.ok) {
-      track.errorCount += 1;
-      await track.save();
-      return res.json({ ok: true, deactivated: false, transient: true,
-                        note: 'YouTube still reports this video as playable — kept' });
-    }
-
     track.errorCount += 1;
-    track.isActive = false;
-    track.errorReason = verdict.reason || 'not playable outside YouTube';
+
+    // Remember who it failed for. An anonymous listener still counts as one
+    // distinct reporter so the mechanism works before people register.
+    const id = who || 'anon:' + (req.ip || 'unknown');
+    if (!track.errorTokens.includes(id)) {
+      track.errorTokens.push(id);
+      if (track.errorTokens.length > 20) track.errorTokens = track.errorTokens.slice(-20);
+    }
+    const distinct = track.errorTokens.length;
+
+    const retire = (by, reason) => {
+      track.isActive = false;
+      track.disabledBy = by;
+      track.errorReason = reason;
+    };
+
+    // 1. YouTube says it is unplayable → pull it immediately, for everyone.
+    if (PERMANENT_ERROR_CODES.has(code)) {
+      const verdict = await checkEmbeddable(videoId);
+      if (!verdict.ok) {
+        retire('youtube', verdict.reason || 'not playable outside YouTube');
+        await track.save();
+        return res.json({ ok: true, deactivated: true, by: 'youtube', reason: track.errorReason });
+      }
+    }
+
+    // 2. YouTube won't admit to it, but it keeps failing for different people —
+    //    region locks and age gates look exactly like this. Pull it anyway so
+    //    the next listener never meets it.
+    if (distinct >= DISTINCT_LISTENER_LIMIT) {
+      const verdict = await checkEmbeddable(videoId);
+      if (!verdict.ok) retire('youtube', verdict.reason);
+      else retire('listeners', `failed for ${distinct} different listeners`);
+      await track.save();
+      return res.json({ ok: true, deactivated: true, by: track.disabledBy,
+                        reason: track.errorReason, listeners: distinct });
+    }
+
+    // 3. Not enough evidence yet — keep serving it.
     await track.save();
-    res.json({ ok: true, deactivated: true, reason: track.errorReason });
+    res.json({ ok: true, deactivated: false, listeners: distinct,
+               needed: DISTINCT_LISTENER_LIMIT });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -366,14 +399,27 @@ router.post('/admin/playlists/:id/import', auth, async (req, res) => {
 // error counters. This undoes damage from transient errors on poor connections.
 router.post('/admin/repair', auth, async (req, res) => {
   try {
-    const suspects = await RadioTrack.find({ isActive: false, errorCount: { $gt: 0 } })
-      .select('videoId title playlist').lean();
+    // Songs pulled because they kept failing for different listeners pass
+    // YouTube's own check by definition (region locks and age gates are
+    // invisible to it), so restoring them would just put broken songs back in
+    // front of people. Only do that when the admin explicitly asks.
+    const includeListenerFlagged = req.body.includeListenerFlagged === true;
+    const scope = { isActive: false, errorCount: { $gt: 0 } };
+    if (!includeListenerFlagged) scope.disabledBy = { $ne: 'listeners' };
+
+    const suspects = await RadioTrack.find(scope)
+      .select('videoId title playlist disabledBy').lean();
+
+    const listenerFlagged = await RadioTrack.countDocuments({ isActive: false, disabledBy: 'listeners' });
 
     if (!suspects.length) {
       const cleared = (await RadioTrack.updateMany(
-        { isActive: true, errorCount: { $gt: 0 } }, { $set: { errorCount: 0, errorReason: '' } })).modifiedCount;
-      return res.json({ message: `Nothing to restore. Cleared ${cleared} stale error counter(s).`,
-                        restored: 0, stillBad: 0, cleared });
+        { isActive: true, errorCount: { $gt: 0 } },
+        { $set: { errorCount: 0, errorReason: '', errorTokens: [] } })).modifiedCount;
+      return res.json({
+        message: `Nothing to restore. Cleared ${cleared} stale error counter(s).` +
+          (listenerFlagged ? ` ${listenerFlagged} song(s) stay off because they kept failing for real listeners.` : ''),
+        restored: 0, stillBad: 0, cleared, listenerFlagged });
     }
 
     const { playable, rejected } = await verifyEmbeddable(suspects);
@@ -381,22 +427,27 @@ router.post('/admin/repair', auth, async (req, res) => {
     const restored = playable.length
       ? (await RadioTrack.updateMany(
           { _id: { $in: playable.map(t => t._id) } },
-          { $set: { isActive: true, errorCount: 0, errorReason: '', lastErrorAt: null } })).modifiedCount
+          { $set: { isActive: true, errorCount: 0, errorReason: '', disabledBy: '',
+                    errorTokens: [], lastErrorAt: null } })).modifiedCount
       : 0;
 
     // Record why the genuinely dead ones stay off.
     for (const t of rejected) {
-      await RadioTrack.updateOne({ _id: t._id }, { $set: { errorReason: t.reason || 'not playable' } });
+      await RadioTrack.updateOne({ _id: t._id },
+        { $set: { errorReason: t.reason || 'not playable', disabledBy: 'youtube' } });
     }
 
     // Songs still playing but carrying old strikes get a clean slate too.
     const cleared = (await RadioTrack.updateMany(
-      { isActive: true, errorCount: { $gt: 0 } }, { $set: { errorCount: 0, errorReason: '' } })).modifiedCount;
+      { isActive: true, errorCount: { $gt: 0 } },
+      { $set: { errorCount: 0, errorReason: '', errorTokens: [] } })).modifiedCount;
 
     res.json({
       message: `Restored ${restored} song(s) that were switched off but still play. ` +
-               `${rejected.length} are genuinely blocked by YouTube. Cleared ${cleared} stale counter(s).`,
-      restored, stillBad: rejected.length, cleared,
+               `${rejected.length} are genuinely blocked by YouTube. Cleared ${cleared} stale counter(s).` +
+               (!includeListenerFlagged && listenerFlagged
+                 ? ` ${listenerFlagged} song(s) left off — they kept failing for real listeners.` : ''),
+      restored, stillBad: rejected.length, cleared, listenerFlagged,
       rejected: rejected.slice(0, 20).map(t => ({ title: t.title, reason: t.reason }))
     });
   } catch (err) {
@@ -424,15 +475,18 @@ router.post('/admin/playlists/:id/verify', auth, async (req, res) => {
     const disabled = badIds.length
       ? (await RadioTrack.updateMany(
           { playlist: playlist._id, videoId: { $in: badIds } },
-          { $set: { isActive: false, lastErrorAt: new Date() }, $inc: { errorCount: 1 } })).modifiedCount
+          { $set: { isActive: false, lastErrorAt: new Date(), disabledBy: 'youtube' },
+            $inc: { errorCount: 1 } })).modifiedCount
       : 0;
 
     // A song that only ever failed the embed check gets another chance once it
     // passes again. Songs an admin switched off by hand stay off.
     const restored = goodIds.length
       ? (await RadioTrack.updateMany(
-          { playlist: playlist._id, videoId: { $in: goodIds }, isActive: false, errorCount: { $gt: 0 } },
-          { $set: { isActive: true, errorCount: 0, errorReason: '', lastErrorAt: null } })).modifiedCount
+          { playlist: playlist._id, videoId: { $in: goodIds }, isActive: false,
+            errorCount: { $gt: 0 }, disabledBy: { $ne: 'listeners' } },
+          { $set: { isActive: true, errorCount: 0, errorReason: '', disabledBy: '',
+                    errorTokens: [], lastErrorAt: null } })).modifiedCount
       : 0;
 
     const active = await RadioTrack.countDocuments({ playlist: playlist._id, isActive: true });
@@ -451,7 +505,10 @@ router.get('/admin/playlists/:id/tracks', auth, async (req, res) => {
     const tracks = await RadioTrack.find({ playlist: req.params.id })
       .sort({ order: 1, _id: 1 })
       .lean();
-    res.json(tracks);
+    // Send how many listeners it failed for, never the visitor tokens themselves.
+    res.json(tracks.map(({ errorTokens, ...t }) => ({
+      ...t, errorListeners: (errorTokens || []).length
+    })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -522,8 +579,16 @@ router.patch('/admin/tracks/:id', auth, async (req, res) => {
     if (req.body.order != null)    track.order = Number(req.body.order) || 0;
     if (req.body.isActive != null) {
       track.isActive = !!req.body.isActive;
-      // Re-enabling a song that was auto-disabled gives it a clean slate.
-      if (track.isActive) track.errorCount = 0;
+      if (track.isActive) {
+        // Re-enabling by hand gives the song a clean slate, otherwise a single
+        // further failure would immediately trip the listener threshold again.
+        track.errorCount = 0;
+        track.errorTokens = [];
+        track.errorReason = '';
+        track.disabledBy = '';
+      } else {
+        track.disabledBy = 'admin';
+      }
     }
     await track.save();
     res.json(track);
