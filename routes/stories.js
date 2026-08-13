@@ -143,15 +143,23 @@ router.get('/:id/viewers', async (req, res) => {
       return res.status(403).json({ message: 'Only the poster can see this' });
     }
 
-    const visitors = await Visitor.find({ visitorToken: { $in: story.viewedTokens } })
+    const realTokens = story.viewedTokens.filter(t => !t.startsWith('boost:'));
+    const visitors = await Visitor.find({ visitorToken: { $in: realTokens } })
       .select('visitorToken registeredName visitorName registeredPhoto');
     const infoMap = new Map(visitors.map(v => [v.visitorToken, v]));
 
     // viewedTokens is append-only, so reversing gives most-recent-first
     const viewers = story.viewedTokens.slice().reverse().map(token => {
+      // Boosted viewers carry their display name in the token itself.
+      if (token.startsWith('boost:')) {
+        return { name: token.slice(6), profilePic: undefined,
+                 liked: story.likedTokens.includes(token) };
+      }
       const v = infoMap.get(token);
+      const realName = v && (v.registeredName || v.visitorName);
       return {
-        name: (v && (v.registeredName || v.visitorName)) || 'आगंतुक',
+        // No registered name → a stable handle, not a repeated "आगंतुक".
+        name: realName || handleFor(handleNumberForToken(token)),
         profilePic: v ? v.registeredPhoto : undefined,
         liked: story.likedTokens.includes(token),
       };
@@ -218,6 +226,117 @@ router.delete('/:id/admin', auth, async (req, res) => {
     await cloudinary.uploader.destroy(story.mediaCloudinaryId).catch(() => {});
     await story.deleteOne();
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+/* ── Admin: boost views / likes ──────────────────────────────
+   Adds synthetic viewers so a quiet story does not look empty. They are stored
+   as 'boost:userNNN' tokens, which keeps them out of the real-visitor lookup
+   and lets the admin see exactly how many are added rather than organic. */
+
+/* Display handles.
+   Every viewer without a registered name gets a userNNNN handle instead of a
+   wall of identical "आगंतुक" rows. Real visitors get one derived from their
+   token, so the same person always appears as the same handle; boosted
+   viewers get a random unused one. The two are indistinguishable to the
+   poster by design — the real/added split lives in the Admin Panel. */
+
+function handleFor(n) {
+  return 'user' + String(n).padStart(4, '0');
+}
+
+// Stable 4-digit number for a real visitor token.
+function handleNumberForToken(token) {
+  let h = 0;
+  for (let i = 0; i < token.length; i++) {
+    h = ((h << 5) - h + token.charCodeAt(i)) | 0;
+  }
+  return (Math.abs(h) % 9000) + 1000;   // 1000-9999
+}
+
+/* Random handles for boosted viewers, avoiding every number already in use in
+   this story — including the ones real viewers hash to — so no two rows in the
+   list ever show the same name. */
+function makeBoostHandles(story, count) {
+  const used = new Set();
+  for (const t of story.viewedTokens) {
+    if (t.startsWith('boost:')) {
+      const m = /^boost:user(\d+)$/.exec(t);
+      if (m) used.add(parseInt(m[1], 10));
+    } else {
+      used.add(handleNumberForToken(t));
+    }
+  }
+  const out = [];
+  let guard = 0;
+  while (out.length < count && guard < count * 200 && used.size < 8999) {
+    guard++;
+    const n = 1000 + Math.floor(Math.random() * 9000);
+    if (used.has(n)) continue;
+    used.add(n);
+    out.push(handleFor(n));
+  }
+  return out;
+}
+
+router.post('/:id/boost', auth, async (req, res) => {
+  try {
+    const story = await Story.findById(req.params.id);
+    if (!story) return res.status(404).json({ message: 'Story not found' });
+
+    const views = Math.max(0, Math.min(parseInt(req.body.views, 10) || 0, 5000));
+    const likes = Math.max(0, Math.min(parseInt(req.body.likes, 10) || 0, 5000));
+    if (!views && !likes) {
+      return res.status(400).json({ message: 'Give a number of views or likes to add' });
+    }
+
+    // Random handles, never reusing one already present in this story.
+    const handles = makeBoostHandles(story, views);
+    const added = [];
+    for (const h of handles) {
+      const token = 'boost:' + h;
+      story.viewedTokens.push(token);
+      added.push(token);
+    }
+    story.viewCount += added.length;
+    story.boostedViews += added.length;
+
+    // Boosted likes are attached to boosted viewers, so a "liked" row in the
+    // viewers list always has a viewer behind it.
+    const likeable = story.viewedTokens.filter(t => t.startsWith('boost:'));
+    for (let i = 0; i < Math.min(likes, likeable.length); i++) {
+      if (!story.likedTokens.includes(likeable[i])) story.likedTokens.push(likeable[i]);
+    }
+    story.likeCount += likes;
+    story.boostedLikes += likes;
+
+    await story.save();
+    res.json({
+      message: `Added ${added.length} view(s) and ${likes} like(s)`,
+      viewCount: story.viewCount, likeCount: story.likeCount,
+      boostedViews: story.boostedViews, boostedLikes: story.boostedLikes,
+      added: added.length
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin listing with the real-vs-boosted split visible.
+router.get('/admin/all', auth, async (req, res) => {
+  try {
+    const stories = await Story.find().sort({ createdAt: -1 }).limit(200).lean();
+    res.json(stories.map(s => ({
+      _id: s._id, name: s.name, caption: s.caption, mediaUrl: s.mediaUrl,
+      createdAt: s.createdAt, expiresAt: s.expiresAt,
+      viewCount: s.viewCount, likeCount: s.likeCount,
+      boostedViews: s.boostedViews || 0, boostedLikes: s.boostedLikes || 0,
+      realViews: Math.max(0, s.viewCount - (s.boostedViews || 0)),
+      realLikes: Math.max(0, s.likeCount - (s.boostedLikes || 0))
+    })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
