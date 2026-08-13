@@ -50,6 +50,7 @@ app.use('/api/android',        require('./routes/androidDevices'));
 app.use('/api/cricket',        require('./routes/cricket'));
 app.use('/api/user-location',  require('./routes/userLocation'));
 app.use('/api/popups',         require('./routes/popups'));
+app.use('/api/radio',          require('./routes/radio'));
 
 // ── Service routes ───────────────────────────────────────────
 app.use('/api/mcs',          require('./routes/mcs'));
