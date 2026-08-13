@@ -15,11 +15,21 @@ const radioTrackSchema = new mongoose.Schema({
   playCount:    { type: Number, default: 0 },
   lastPlayedAt: { type: Date, default: null },
 
-  // Set when the YouTube player reports the upload can't be embedded, so a
-  // dead track stops being served instead of making every listener skip it.
+  // Failure tracking. A song is pulled from the playlist for everyone once it
+  // is clearly broken — but "clearly" has to mean more than one person on a bad
+  // connection, or a single village tower outage would empty the playlist.
   errorCount:  { type: Number, default: 0 },
   lastErrorAt: { type: Date, default: null },
-  errorReason: { type: String, default: '' }   // only set when actually retired
+
+  // Distinct listeners it has failed for. This, not the raw count, is what
+  // decides whether the song is genuinely broken. Capped to stay small.
+  errorTokens: { type: [String], default: [] },
+
+  errorReason: { type: String, default: '' },   // human text, set when retired
+  // Who took it out: 'youtube' (YouTube confirmed it is unplayable),
+  // 'listeners' (it kept failing for different people), 'admin' (switched off
+  // by hand). Drives what the repair pass is allowed to bring back.
+  disabledBy:  { type: String, default: '' }
 }, { timestamps: true });
 
 // One row per video per playlist — re-importing a playlist updates instead of duplicating.
