@@ -15,6 +15,12 @@ const storySchema = new mongoose.Schema({
   likeCount: { type: Number, default: 0 },
   likedTokens: [{ type: String }],
 
+  // Added from the Admin Panel. Included in viewCount/likeCount so the poster
+  // sees one number, but tracked separately so real reach stays measurable.
+  // Boosted viewers are stored in viewedTokens as 'boost:userNNN'.
+  boostedViews: { type: Number, default: 0 },
+  boostedLikes: { type: Number, default: 0 },
+
   createdAt: { type: Date, default: Date.now },
   // TTL index — MongoDB's background sweep removes the document itself once
   // expiresAt passes. This is only a safety net for the DB side; the actual
