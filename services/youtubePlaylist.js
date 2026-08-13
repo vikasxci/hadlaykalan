@@ -218,6 +218,39 @@ async function fetchPlaylist(urlOrId, opts = {}) {
   };
 }
 
+/* ── Audio-quality filter ────────────────────────────────── */
+
+/*
+ * The embedded player serves one audio tier no matter what we ask for, so the
+ * only thing that decides how a song sounds here is WHICH UPLOAD it is. These
+ * title patterns mark re-processed audio — echo-drenched "Jhankar Beats" rips,
+ * 8D pans, slowed+reverb edits, karaoke and instrumental beds, phone-recorded
+ * covers. They are the usual reason an old Hindi song sounds thin or muddy,
+ * and playlists assembled by other people are full of them.
+ */
+const LOW_QUALITY_TITLE = new RegExp([
+  'jhankar', '8\\s?d\\b', 'slowed', 'reverb', 'lo-?fi', 'nightcore',
+  'karaoke', 'instrumental', 'without music', 'clean version',
+  'cover by', 'unplugged cover', 'sung by',
+  'ringtone', 'whatsapp status', 'status video',
+  'bass boost', 'remix', 'mashup', 'dj\\s', 'remake'
+].join('|'), 'i');
+
+function isLowQualityUpload(title) {
+  return LOW_QUALITY_TITLE.test(String(title || ''));
+}
+
+/** Splits tracks into keepers and re-processed uploads worth leaving out. */
+function filterLowQuality(tracks) {
+  const keep = [];
+  const dropped = [];
+  for (const t of tracks) {
+    if (isLowQualityUpload(t.title)) dropped.push(t);
+    else keep.push(t);
+  }
+  return { keep, dropped };
+}
+
 /* ── Embeddability check ─────────────────────────────────── */
 
 /**
@@ -275,4 +308,5 @@ async function verifyEmbeddable(tracks, opts = {}) {
   return { playable, rejected };
 }
 
-module.exports = { fetchPlaylist, parsePlaylistId, verifyEmbeddable, checkEmbeddable, SCRAPE_CAP };
+module.exports = { fetchPlaylist, parsePlaylistId, verifyEmbeddable, checkEmbeddable,
+                   filterLowQuality, isLowQualityUpload, SCRAPE_CAP };
