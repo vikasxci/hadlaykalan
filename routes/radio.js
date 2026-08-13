@@ -5,8 +5,8 @@ const RadioTrack = require('../models/RadioTrack');
 const RadioPlay = require('../models/RadioPlay');
 const Visitor = require('../models/Visitor');
 const auth = require('../middleware/auth');
-const { fetchPlaylist, parsePlaylistId, verifyEmbeddable, checkEmbeddable, SCRAPE_CAP } =
-  require('../services/youtubePlaylist');
+const { fetchPlaylist, parsePlaylistId, verifyEmbeddable, checkEmbeddable,
+        filterLowQuality, SCRAPE_CAP } = require('../services/youtubePlaylist');
 
 const VIDEO_ID = /^[\w-]{11}$/;
 
@@ -319,6 +319,17 @@ router.post('/admin/playlists/:id/import', auth, async (req, res) => {
       return res.status(422).json({ message: err.message });
     }
 
+    // Leave out re-processed uploads (Jhankar Beats, 8D, slowed+reverb,
+    // karaoke, covers). The player serves one audio tier regardless of our
+    // settings, so which upload a song comes from is what decides how it
+    // sounds. Pass skipLowQuality:false to import a playlist verbatim.
+    let lowQuality = [];
+    if (req.body.skipLowQuality !== false) {
+      const filtered = filterLowQuality(result.tracks);
+      result.tracks = filtered.keep;
+      lowQuality = filtered.dropped;
+    }
+
     // Drop the videos the uploader has blocked from embedding before they ever
     // reach the playlist — those are the songs that would "skip" for listeners.
     let rejected = [];
@@ -373,6 +384,9 @@ router.post('/admin/playlists/:id/import', auth, async (req, res) => {
 
     const total = await RadioTrack.countDocuments({ playlist: playlist._id });
     const notes = [];
+    if (lowQuality.length) {
+      notes.push(`${lowQuality.length} re-processed upload(s) skipped (remix, 8D, slowed, karaoke and similar) so the radio sounds clean`);
+    }
     if (rejected.length) {
       notes.push(`${rejected.length} song(s) were left out because YouTube will not let them play outside youtube.com`);
     }
@@ -387,6 +401,8 @@ router.post('/admin/playlists/:id/import', auth, async (req, res) => {
       method: result.method,
       truncated: result.truncated,
       rejected: rejected.map(r => ({ videoId: r.videoId, title: r.title, reason: r.reason })),
+      lowQuality: lowQuality.slice(0, 20).map(r => ({ videoId: r.videoId, title: r.title })),
+      lowQualityCount: lowQuality.length,
       note: notes.join('. ')
     });
   } catch (err) {
