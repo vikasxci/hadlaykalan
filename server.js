@@ -40,6 +40,7 @@ app.use('/api/village-info', require('./routes/villageInfo'));
 app.use('/api/contest',      require('./routes/contest'));
 app.use('/api/posts',        require('./routes/posts'));
 app.use('/api/stories',      require('./routes/stories'));
+app.use('/api/home-media',   require('./routes/homeMedia'));
 app.use('/api/settings',     require('./routes/settings'));
 app.use('/api/visitors',     require('./routes/visitors'));
 app.use('/api/worker',       require('./routes/worker'));
