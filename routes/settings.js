@@ -5,21 +5,31 @@ const Role = require('../models/Role');
 const AppConfig = require('../models/AppConfig');
 const auth = require('../middleware/auth');
 
+const { SECTION_DEFAULTS, sanitizeSections } = require('../helpers/homeSections');
+
 // ── App Config keys with defaults ─────────────────────────────
-const APP_CONFIG_DEFAULTS = {
+// Built fresh per call: `sections` is a nested object and a shared reference
+// would let one request's edit leak into the next request's defaults.
+const appConfigDefaults = () => ({
   apkUrl:          '',
   bannerEnabled:   true,
   bannerTitle:     'हडलाय कलां ऐप',
   bannerSubtitle:  'नोटिफिकेशन पाएं • तेज़ अनुभव',
   homeCardTagline: 'Android ऐप डाउनलोड करें',
-};
+  sections:        SECTION_DEFAULTS(),
+});
+
+const APP_CONFIG_DEFAULTS = appConfigDefaults();
 
 // GET /api/settings/app-config  — public, returns merged defaults + DB values
 router.get('/app-config', async (req, res) => {
   try {
     const docs = await AppConfig.find();
-    const result = { ...APP_CONFIG_DEFAULTS };
+    const result = appConfigDefaults();
     docs.forEach(d => { result[d.key] = d.value; });
+    // Stored sections may predate a newly added key — merge so the frontend
+    // always receives every section rather than `undefined` for a new one.
+    result.sections = sanitizeSections(result.sections);
     res.json(result);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -33,9 +43,13 @@ router.put('/app-config/:key', auth, async (req, res) => {
     if (!Object.prototype.hasOwnProperty.call(APP_CONFIG_DEFAULTS, key)) {
       return res.status(400).json({ message: `Unknown config key: ${key}` });
     }
+    const value = key === 'sections'
+      ? sanitizeSections(req.body.value)
+      : req.body.value;
+
     const doc = await AppConfig.findOneAndUpdate(
       { key },
-      { value: req.body.value, updatedAt: new Date() },
+      { value, updatedAt: new Date() },
       { upsert: true, new: true }
     );
     res.json(doc);
